@@ -19,7 +19,10 @@
 #define GAP 4
 #define MAXG 48
 
-enum { ID_USE = 1, ID_CANCEL, ID_DEFAULTS, ID_PRESET, ID_FIRST = 10 };
+enum { ID_USE = 1, ID_SAVE, ID_CANCEL, ID_DEFAULTS, ID_PRESET, ID_FIRST = 10 };
+
+/* Room for the Save / Use / Defaults / Cancel row. */
+#define MINW 420
 
 typedef struct {
     struct Screen *scr;
@@ -89,11 +92,15 @@ static void page_close(Page *pg)
         CloseFont(pg->font);
 }
 
-/* Use / Cancel (and Defaults) along the bottom, at y. */
+/* Save / Use (/ Defaults) / Cancel along the bottom, at y - the order of
+ * the system's own prefs editors. Save keeps the settings, Use only until
+ * the next reboot. */
 static struct Gadget *buttons(Page *pg, struct Gadget *gad, int y, int width, int defaults)
 {
+    static const char *txt[] = {"Save", "Use", "Defaults", "Cancel"};
+    static const int ids[] = {ID_SAVE, ID_USE, ID_DEFAULTS, ID_CANCEL};
     struct NewGadget ng;
-    int bw = tlen(pg, "Defaults") + 24, x = pg->win->BorderLeft + M;
+    int bw = tlen(pg, "Defaults") + 24, x = pg->win->BorderLeft + M, n = defaults ? 4 : 3, i, k = 0;
     memset(&ng, 0, sizeof(ng));
     ng.ng_VisualInfo = pg->vi;
     ng.ng_TextAttr = pg->ta;
@@ -101,23 +108,18 @@ static struct Gadget *buttons(Page *pg, struct Gadget *gad, int y, int width, in
     ng.ng_Width = bw;
     ng.ng_Height = bh(pg);
     ng.ng_Flags = PLACETEXT_IN;
-    ng.ng_LeftEdge = x;
-    ng.ng_GadgetText = (UBYTE *)"Use";
-    ng.ng_GadgetID = ID_USE;
-    gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_END);
-    if (defaults) {
-        ng.ng_LeftEdge = x + (width - 2 * M - bw) / 2;
-        ng.ng_GadgetText = (UBYTE *)"Defaults";
-        ng.ng_GadgetID = ID_DEFAULTS;
+    for (i = 0; i < 4; i++) {
+        if (ids[i] == ID_DEFAULTS && !defaults)
+            continue;
+        ng.ng_LeftEdge = x + k++ * (width - 2 * M - bw) / (n - 1);
+        ng.ng_GadgetText = (UBYTE *)txt[i];
+        ng.ng_GadgetID = ids[i];
         gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_END);
     }
-    ng.ng_LeftEdge = x + width - 2 * M - bw;
-    ng.ng_GadgetText = (UBYTE *)"Cancel";
-    ng.ng_GadgetID = ID_CANCEL;
-    return CreateGadget(BUTTON_KIND, gad, &ng, TAG_END);
+    return gad;
 }
 
-/* Wait for Use (1), Cancel / close (0). on_gadget handles the others. */
+/* Wait for Save (2), Use (1), Cancel / close (0). on_gadget handles the others. */
 static int page_run(Page *pg, void (*on_gadget)(Page *, int id, UWORD code, void *ctx), void *ctx)
 {
     for (;;) {
@@ -140,6 +142,8 @@ static int page_run(Page *pg, void (*on_gadget)(Page *, int id, UWORD code, void
                 GT_EndRefresh(pg->win, TRUE);
                 break;
             case IDCMP_GADGETUP:
+                if (gad->GadgetID == ID_SAVE)
+                    return 2;
                 if (gad->GadgetID == ID_USE)
                     return 1;
                 if (gad->GadgetID == ID_CANCEL)
@@ -231,8 +235,8 @@ int prefs_variants(const PrefsUI *ui, Prefs *p, int system)
         cols--;
     rows = (t.n + cols - 1) / cols;
     w = 2 * M + cols * colw;
-    if (w < 300)
-        w = 300;
+    if (w < MINW)
+        w = MINW;
     h = 4 + rows * rowh + GAP + 6 + (ui->ta->ta_YSize + 6) + 4;
     if (!page_open(&pg, ui, title, w, h))
         return 0;
@@ -254,14 +258,13 @@ int prefs_variants(const PrefsUI *ui, Prefs *p, int system)
     gad = buttons(&pg, gad, 4 + rows * rowh + GAP + 6, w, 1);
     if (gad) {
         page_show(&pg);
-        if (page_run(&pg, ticks_defaults, &t)) {
+        if ((ok = page_run(&pg, ticks_defaults, &t)) != 0) {
             for (i = 0; i < t.n; i++) {
                 if (checked(&pg, pg.g[i]))
                     p->allowed |= t.bits[i];
                 else
                     p->allowed &= ~t.bits[i];
             }
-            ok = 1;
         }
     }
     page_close(&pg);
@@ -292,6 +295,8 @@ int prefs_sets(const PrefsUI *ui, Prefs *p)
     rowh = f->tf_YSize + 6 + 3;
     CloseFont(f);
     w = 2 * M + 26 + 8 + labw + 16 + lw + 200;
+    if (w < MINW)
+        w = MINW;
     if (w > ui->scr->Width - 20)
         w = ui->scr->Width - 20;
     h = 4 + NSETS * rowh + GAP + 6 + (ui->ta->ta_YSize + 6) + 4;
@@ -330,7 +335,7 @@ int prefs_sets(const PrefsUI *ui, Prefs *p)
     gad = buttons(&pg, gad, 4 + NSETS * rowh + GAP + 6, w, 0);
     if (gad) {
         page_show(&pg);
-        if (page_run(&pg, NULL, NULL)) {
+        if ((ok = page_run(&pg, NULL, NULL)) != 0) {
             unsigned long sets = 0;
             for (i = 0; i < NSETS; i++)
                 if (checked(&pg, pg.g[i]))
@@ -341,7 +346,6 @@ int prefs_sets(const PrefsUI *ui, Prefs *p)
             for (i = FAM_DEMOS; i < NFAMS; i++)
                 if (pg.g[NSETS + i])
                     strncpy(p->dirs[i], str_of(pg.g[NSETS + i]), sizeof(p->dirs[0]) - 1);
-            ok = 1;
         }
     }
     page_close(&pg);
@@ -437,14 +441,13 @@ int prefs_server(const PrefsUI *ui, Prefs *p)
     gad = buttons(&pg, gad, 4 + 7 * rowh + 6, w, 0);
     if (gad) {
         page_show(&pg);
-        if (page_run(&pg, server_gadget, NULL)) {
+        if ((ok = page_run(&pg, server_gadget, NULL)) != 0) {
             strncpy(p->host, str_of(pg.g[S_HOST]), sizeof(p->host) - 1);
             strncpy(p->webdir, str_of(pg.g[S_WEB]), sizeof(p->webdir) - 1);
             strncpy(p->ftpdir, str_of(pg.g[S_FTP]), sizeof(p->ftpdir) - 1);
             strncpy(p->user, str_of(pg.g[S_USER]), sizeof(p->user) - 1);
             strncpy(p->pass, str_of(pg.g[S_PASS]), sizeof(p->pass) - 1);
             p->ftp_only = checked(&pg, pg.g[S_FTPONLY]);
-            ok = 1;
         }
     }
     page_close(&pg);

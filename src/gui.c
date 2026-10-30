@@ -648,8 +648,8 @@ static void about(void)
     EasyRequest(G.win, &es, NULL, (ULONG)G.e->prefs.host);
 }
 
-/* A settings page; after Use the settings are saved and, when there are
- * results to redo, checked again with them. */
+/* A settings page; after Save (ENV: + ENVARC:) or Use (ENV: only) the list
+ * is checked again with the new settings when there are results to redo. */
 static void settings(int which)
 {
     PrefsUI ui;
@@ -670,12 +670,15 @@ static void settings(int which)
         SetWindowPointer(G.win, TAG_END);
     if (!ok)
         return;
-    prefs_save(&G.e->prefs);
+    if (ok == 2)
+        prefs_save(&G.e->prefs);      /* Save: kept */
+    else
+        prefs_use(&G.e->prefs);       /* Use: until the next reboot */
     sync_ftp_tick();
     if (G.e->n || which == MN_SETS)
         do_check();                   /* the list with the new settings */
     else
-        gui_status("Settings saved");
+        gui_status(ok == 2 ? "Settings saved" : "Settings in use until the next reboot");
 }
 
 static void do_menu(ULONG id, struct MenuItem *it)

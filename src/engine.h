@@ -35,7 +35,8 @@ typedef struct {
 
 void prefs_default(Prefs *p);
 void prefs_load(Prefs *p);              /* the defaults, then what is saved */
-int  prefs_save(const Prefs *p);        /* ENV: and ENVARC: */
+int  prefs_save(const Prefs *p);        /* ENV: and ENVARC: - kept */
+int  prefs_use(const Prefs *p);         /* ENV: only - until the next reboot */
 
 typedef struct {
     struct Node node;       /* for the window's list; ln_Name = label */

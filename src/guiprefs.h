@@ -13,7 +13,7 @@ typedef struct {
     struct Window *parent;
 } PrefsUI;
 
-/* Each returns 1 when the user pressed Use (p changed), 0 for Cancel. */
+/* Each returns 2 for Save, 1 for Use (p changed either way), 0 for Cancel. */
 int prefs_server(const PrefsUI *ui, Prefs *p);
 int prefs_sets(const PrefsUI *ui, Prefs *p);
 int prefs_variants(const PrefsUI *ui, Prefs *p, int system);   /* 0 Languages, 1 Systems */

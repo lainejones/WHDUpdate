@@ -142,7 +142,7 @@ void prefs_load(Prefs *p)
         p->sets = 1UL << SET_GAMES;
 }
 
-int prefs_save(const Prefs *p)
+static int prefs_write(const Prefs *p, int keep)
 {
     char *buf = (char *)malloc(4096);
     int ok = 0, n;
@@ -155,10 +155,21 @@ int prefs_save(const Prefs *p)
                  p->sets, p->allowed, p->dirs[FAM_GAMES], p->dirs[FAM_DEMOS], p->dirs[FAM_MAGS]);
     if (n > 0 && n < 4096) {
         ok = save_file("ENV:" PREFSNAME, buf, n);
-        ok = save_file("ENVARC:" PREFSNAME, buf, n) && ok;
+        if (keep)
+            ok = save_file("ENVARC:" PREFSNAME, buf, n) && ok;
     }
     free(buf);
     return ok;
+}
+
+int prefs_save(const Prefs *p)
+{
+    return prefs_write(p, 1);
+}
+
+int prefs_use(const Prefs *p)
+{
+    return prefs_write(p, 0);
 }
 
 /* ---- the engine --------------------------------------------------------- */
