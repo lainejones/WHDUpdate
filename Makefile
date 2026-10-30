@@ -17,7 +17,7 @@ AMIGA   = src/main.c src/net.c src/scan.c src/update.c src/engine.c src/gui.c
 HDRS    = src/slave.h src/inflate.h src/dat.h src/match.h
 AHDRS   = src/amiga.h src/update.h src/engine.h
 
-out/WHDUpdate: $(CORE) $(AMIGA) $(HDRS) $(AHDRS)
+out/WHDUpdate: $(CORE) $(AMIGA) $(HDRS) $(AHDRS) Makefile
 	mkdir -p out
 	$(CC) $(CFLAGS) -s -o $@ $(CORE) $(AMIGA) -lamiga
 
