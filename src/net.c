@@ -64,6 +64,15 @@ void url_decode(const char *in, char *out, int size)
     out[n] = 0;
 }
 
+/* The FTP login (the settings' FTPUSER / FTPPASS; Turran's is ftp / amiga). */
+static char ftp_user[40] = "ftp", ftp_pass[40] = "amiga";
+
+void ftp_login(const char *user, const char *pass)
+{
+    strncpy(ftp_user, user[0] ? user : "ftp", sizeof(ftp_user) - 1);
+    strncpy(ftp_pass, pass, sizeof(ftp_pass) - 1);
+}
+
 /* Does s start with word (given in lower case), ignoring case? */
 static int same_word(const char *s, const char *word)
 {
@@ -334,8 +343,8 @@ static unsigned char *ftp_fetch(const char *host, const char *path, int list,
         return NULL;
     }
     if (ftp_reply(cfd, reply, sizeof(reply)) != 220 ||
-        ((code = ftp_cmd(cfd, "USER", "ftp", reply, sizeof(reply))) != 331 && code != 230) ||
-        (code == 331 && ftp_cmd(cfd, "PASS", "amiga", reply, sizeof(reply)) != 230) ||
+        ((code = ftp_cmd(cfd, "USER", ftp_user, reply, sizeof(reply))) != 331 && code != 230) ||
+        (code == 331 && ftp_cmd(cfd, "PASS", ftp_pass, reply, sizeof(reply)) != 230) ||
         ftp_cmd(cfd, "TYPE", "I", reply, sizeof(reply)) != 200 ||
         ftp_cmd(cfd, "PASV", NULL, reply, sizeof(reply)) != 227) {
         say("WHDUpdate: FTP login failed: %s", reply);
@@ -503,8 +512,8 @@ int ftp_download(const char *host, const char *path, BPTR fh,
     }
     reply[0] = 0;
     if (ftp_reply(cfd, reply, sizeof(reply)) != 220 ||
-        ((code = ftp_cmd(cfd, "USER", "ftp", reply, sizeof(reply))) != 331 && code != 230) ||
-        (code == 331 && ftp_cmd(cfd, "PASS", "amiga", reply, sizeof(reply)) != 230) ||
+        ((code = ftp_cmd(cfd, "USER", ftp_user, reply, sizeof(reply))) != 331 && code != 230) ||
+        (code == 331 && ftp_cmd(cfd, "PASS", ftp_pass, reply, sizeof(reply)) != 230) ||
         ftp_cmd(cfd, "TYPE", "I", reply, sizeof(reply)) != 200 ||
         ftp_cmd(cfd, "PASV", NULL, reply, sizeof(reply)) != 227 ||
         !(p = strchr(reply, '(')) ||

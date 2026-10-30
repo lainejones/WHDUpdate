@@ -207,11 +207,11 @@ static int cli(Engine *e, LONG *args)
             FPuts(out.report, (STRPTR)"status\tdrawer\tinstalled\tnewest\tpack\tfolder\n");
     }
     if (args[A_ALL]) {
-        stopped = engine_scan(e, "ALL", depth) == -2;
+        stopped = engine_scan(e, "ALL", depth, -1) == -2;
     } else {
         STRPTR *d;
         for (d = (STRPTR *)args[A_DIR]; *d && !stopped; d++) {
-            int s = engine_scan(e, (char *)*d, depth);
+            int s = engine_scan(e, (char *)*d, depth, -1);
             if (s == -1)
                 printf("Cannot find %s\n", (char *)*d);
             else if (s == -2)
@@ -307,7 +307,8 @@ static int whdu_main(int argc, char **argv)
                 return RETURN_ERROR;
             }
         }
-        e.ftp_only = args[A_FTP] != 0;
+        if (args[A_FTP])
+            e.prefs.ftp_only = 1;
     }
     IconBase = OpenLibrary((STRPTR)"icon.library", 37);
     if (!args[A_OFFLINE]) {

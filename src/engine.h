@@ -1,5 +1,5 @@
-/* engine.h - what the Shell and the window front ends share: the pack
- * list, the games found, and updating them. */
+/* engine.h - what the Shell and the window front ends share: the settings,
+ * the pack lists, the games found, and updating them. */
 #ifndef WHDU_ENGINE_H
 #define WHDU_ENGINE_H
 
@@ -7,6 +7,35 @@
 #include <exec/nodes.h>
 #include <dos/dos.h>
 #include "match.h"
+
+/* The pack sets on the server. A beta set belongs to its family: its packs
+ * are matched against the same drawers as the main set's. */
+enum { SET_GAMES, SET_GAMESBETA, SET_DEMOS, SET_DEMOSBETA, SET_MAGS, NSETS };
+enum { FAM_GAMES, FAM_DEMOS, FAM_MAGS, NFAMS };
+typedef struct {
+    const char *label;      /* "Games - Beta & Unofficial" */
+    const char *zipname;    /* the DAT zip's name up to the date */
+    const char *dir;        /* its folder on the server */
+    const char *key;        /* its saved pack list: PROGDIR:Cache/<key>.zip */
+    int family;
+} PackSet;
+extern const PackSet pack_sets[NSETS];
+
+/* The settings, kept in ENVARC:WHDUpdate.prefs (one KEY=value a line). */
+typedef struct {
+    char host[80];          /* ftp2.grandis.nu */
+    char webdir[160];       /* the pack folder by HTTP */
+    char ftpdir[160];       /* the same by FTP */
+    char user[40], pass[40];/* the FTP login */
+    int ftp_only;
+    unsigned long sets;     /* bit per pack set in use */
+    unsigned long allowed;  /* variant words an unlabelled drawer may get */
+    char dirs[NFAMS][400];  /* drawers per family, ';' between them */
+} Prefs;
+
+void prefs_default(Prefs *p);
+void prefs_load(Prefs *p);              /* the defaults, then what is saved */
+int  prefs_save(const Prefs *p);        /* ENV: and ENVARC: */
 
 typedef struct {
     struct Node node;       /* for the window's list; ln_Name = label */
@@ -20,11 +49,12 @@ typedef struct {
 } Game;
 
 typedef struct Engine {
+    Prefs prefs;
     PackIndex ix;
     int have_dat;
-    char datdate[16];
+    unsigned long dat_sets;  /* the sets ix holds */
+    char datdate[16];        /* the newest of their dates */
     unsigned char *slavebuf;
-    int ftp_only;
     char *pattern;          /* parsed GAME= pattern, or NULL */
     Game **games;
     long n, cap;
@@ -34,17 +64,21 @@ typedef struct Engine {
     void *seen_ctx;
 } Engine;
 
-int  engine_init(Engine *e);
+int  engine_init(Engine *e);            /* also loads the settings */
 void engine_free(Engine *e);
 
-/* Get the pack list: the newest from the server unless offline, else the
- * one saved in PROGDIR:Cache. 0 = there is one. */
+/* Get the pack lists of the sets in use: the newest from the server unless
+ * offline, else the ones saved in PROGDIR:Cache. 0 = there is at least one. */
 int  engine_dat(Engine *e, int offline);
 
 void engine_clear(Engine *e);
-/* Add the games under root (or every volume for "ALL"). 0 = done, -1 = no
- * such drawer, -2 = stopped. */
-int  engine_scan(Engine *e, const char *root, int depth);
+/* Add the games under root (or every volume for "ALL"), matched against
+ * the sets in use of family fam (-1: all of them). 0 = done, -1 = no such
+ * drawer, -2 = stopped. */
+int  engine_scan(Engine *e, const char *root, int depth, int fam);
+/* engine_scan() for every drawer in the settings, each family against its
+ * own sets. 0 = done, -2 = stopped. */
+int  engine_scan_all(Engine *e, int depth);
 
 /* Update one game; it then counts as current. 0 = updated, -1 = failed,
  * -2 = stopped. log = an open WHDUpdate.log or 0. */

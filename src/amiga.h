@@ -17,6 +17,9 @@ unsigned char *ftp_get(const char *host, const char *path,
 unsigned char *ftp_list(const char *host, const char *dir,
                         unsigned long *len, unsigned long maxlen);
 
+/* The FTP user and password for the calls below. */
+void ftp_login(const char *user, const char *pass);
+
 /* Download into the open file fh (expect = the size the DAT gives, for the
  * progress line). 0 = done; *got = bytes, *crc = their CRC-32. */
 int http_download(const char *host, const char *path, BPTR fh,

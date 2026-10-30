@@ -1,9 +1,11 @@
-/* engine.c - the pack list, the scan and the updates, without any output
- * of their own beyond say(): the Shell and the window show it their way. */
+/* engine.c - the settings, the pack lists, the scan and the updates, without
+ * any output of their own beyond say(): the Shell and the window show it
+ * their way. */
 #include <exec/types.h>
 #include <dos/dos.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "slave.h"
@@ -13,45 +15,25 @@
 #include "update.h"
 #include "engine.h"
 
-#define HOST        "ftp2.grandis.nu"
-#define PACKDIR     "/turran/FTP/Retroplay WHDLoad Packs/"   /* web path */
-#define FTPDIR      "/Retroplay WHDLoad Packs/"              /* the same by FTP */
-#define SETNAME     "Commodore Amiga - WHDLoad - Games ("
-#define SETDIR      "Commodore_Amiga_-_WHDLoad_-_Games"
 #define CACHEDIR    "PROGDIR:Cache"
-#define CACHE_ZIP   "PROGDIR:Cache/Games.zip"
-#define CACHE_NAME  "PROGDIR:Cache/Games.name"
+#define PREFSNAME   "WHDUpdate.prefs"
 #define MAXZIP      (4UL * 1024 * 1024)
 #define SLAVEMAX    65536L
 
-int engine_init(Engine *e)
-{
-    memset(e, 0, sizeof(*e));
-    packs_init(&e->ix);
-    e->slavebuf = (unsigned char *)malloc(SLAVEMAX);
-    return e->slavebuf ? 0 : -1;
-}
+const PackSet pack_sets[NSETS] = {
+    {"Games", "Commodore Amiga - WHDLoad - Games (",
+     "Commodore_Amiga_-_WHDLoad_-_Games", "Games", FAM_GAMES},
+    {"Games - Beta & Unofficial", "Commodore Amiga - WHDLoad - Games - Beta & Unofficial (",
+     "Commodore_Amiga_-_WHDLoad_-_Games_-_Beta_&_Unofficial", "GamesBeta", FAM_GAMES},
+    {"Demos", "Commodore Amiga - WHDLoad - Demos (",
+     "Commodore_Amiga_-_WHDLoad_-_Demos", "Demos", FAM_DEMOS},
+    {"Demos - Beta & Unofficial", "Commodore Amiga - WHDLoad - Demos - Beta & Unofficial (",
+     "Commodore_Amiga_-_WHDLoad_-_Demos_-_Beta_&_Unofficial", "DemosBeta", FAM_DEMOS},
+    {"Magazines", "Commodore Amiga - WHDLoad - Magazines (",
+     "Commodore_Amiga_-_WHDLoad_-_Magazines", "Magazines", FAM_MAGS},
+};
 
-void engine_clear(Engine *e)
-{
-    long i;
-    for (i = 0; i < e->n; i++)
-        free(e->games[i]);
-    e->n = 0;
-    memset(e->st, 0, sizeof(e->st));
-}
-
-void engine_free(Engine *e)
-{
-    engine_clear(e);
-    free(e->games);
-    packs_free(&e->ix);
-    free(e->slavebuf);
-    free(e->pattern);
-    memset(e, 0, sizeof(*e));
-}
-
-/* ---- the DAT -------------------------------------------------------- */
+/* ---- files ------------------------------------------------------------ */
 
 static unsigned char *load_file(const char *name, unsigned long *len, unsigned long max)
 {
@@ -91,119 +73,286 @@ static int save_file(const char *name, const void *data, unsigned long len)
     return ok;
 }
 
+/* ---- the settings ------------------------------------------------------ */
+
+void prefs_default(Prefs *p)
+{
+    memset(p, 0, sizeof(*p));
+    strcpy(p->host, "ftp2.grandis.nu");
+    strcpy(p->webdir, "/turran/FTP/Retroplay WHDLoad Packs/");
+    strcpy(p->ftpdir, "/Retroplay WHDLoad Packs/");
+    strcpy(p->user, "ftp");
+    strcpy(p->pass, "amiga");
+    p->sets = 1UL << SET_GAMES;
+    p->allowed = variants_default();
+}
+
+static void set_str(char *dst, int size, const char *v)
+{
+    strncpy(dst, v, size - 1);
+    dst[size - 1] = 0;
+}
+
+void prefs_load(Prefs *p)
+{
+    unsigned long len;
+    unsigned char *buf;
+    char *line, *next;
+    prefs_default(p);
+    /* the drawers the window used before the settings file existed */
+    buf = load_file("ENV:WHDUpdate.dirs", &len, 4000);
+    if (!buf)
+        buf = load_file("ENVARC:WHDUpdate.dirs", &len, 4000);
+    if (buf) {
+        char *nl = strpbrk((char *)buf, "\r\n");
+        if (nl)
+            *nl = 0;
+        set_str(p->dirs[FAM_GAMES], sizeof(p->dirs[0]), (char *)buf);
+        free(buf);
+    }
+    buf = load_file("ENV:" PREFSNAME, &len, 16000);
+    if (!buf)
+        buf = load_file("ENVARC:" PREFSNAME, &len, 16000);
+    if (!buf)
+        return;
+    for (line = (char *)buf; line && *line; line = next) {
+        char *v;
+        next = strchr(line, '\n');
+        if (next)
+            *next++ = 0;
+        if ((v = strchr(line, '\r')) != NULL)
+            *v = 0;
+        if (!(v = strchr(line, '=')))
+            continue;
+        *v++ = 0;
+        if (!strcmp(line, "HOST"))            set_str(p->host, sizeof(p->host), v);
+        else if (!strcmp(line, "WEBDIR"))     set_str(p->webdir, sizeof(p->webdir), v);
+        else if (!strcmp(line, "FTPDIR"))     set_str(p->ftpdir, sizeof(p->ftpdir), v);
+        else if (!strcmp(line, "FTPUSER"))    set_str(p->user, sizeof(p->user), v);
+        else if (!strcmp(line, "FTPPASS"))    set_str(p->pass, sizeof(p->pass), v);
+        else if (!strcmp(line, "FTPONLY"))    p->ftp_only = atoi(v) != 0;
+        else if (!strcmp(line, "SETS"))       p->sets = strtoul(v, NULL, 16);
+        else if (!strcmp(line, "ALLOWED"))    p->allowed = strtoul(v, NULL, 16);
+        else if (!strcmp(line, "GAMEDIRS"))   set_str(p->dirs[FAM_GAMES], sizeof(p->dirs[0]), v);
+        else if (!strcmp(line, "DEMODIRS"))   set_str(p->dirs[FAM_DEMOS], sizeof(p->dirs[0]), v);
+        else if (!strcmp(line, "MAGDIRS"))    set_str(p->dirs[FAM_MAGS], sizeof(p->dirs[0]), v);
+    }
+    free(buf);
+    if (!p->sets)
+        p->sets = 1UL << SET_GAMES;
+}
+
+int prefs_save(const Prefs *p)
+{
+    char *buf = (char *)malloc(4096);
+    int ok = 0, n;
+    if (!buf)
+        return 0;
+    n = snprintf(buf, 4096,
+                 "HOST=%s\nWEBDIR=%s\nFTPDIR=%s\nFTPUSER=%s\nFTPPASS=%s\nFTPONLY=%d\n"
+                 "SETS=%lx\nALLOWED=%lx\nGAMEDIRS=%s\nDEMODIRS=%s\nMAGDIRS=%s\n",
+                 p->host, p->webdir, p->ftpdir, p->user, p->pass, p->ftp_only,
+                 p->sets, p->allowed, p->dirs[FAM_GAMES], p->dirs[FAM_DEMOS], p->dirs[FAM_MAGS]);
+    if (n > 0 && n < 4096) {
+        ok = save_file("ENV:" PREFSNAME, buf, n);
+        ok = save_file("ENVARC:" PREFSNAME, buf, n) && ok;
+    }
+    free(buf);
+    return ok;
+}
+
+/* ---- the engine --------------------------------------------------------- */
+
+int engine_init(Engine *e)
+{
+    memset(e, 0, sizeof(*e));
+    packs_init(&e->ix);
+    prefs_load(&e->prefs);
+    e->slavebuf = (unsigned char *)malloc(SLAVEMAX);
+    return e->slavebuf ? 0 : -1;
+}
+
+void engine_clear(Engine *e)
+{
+    long i;
+    for (i = 0; i < e->n; i++)
+        free(e->games[i]);
+    e->n = 0;
+    memset(e->st, 0, sizeof(e->st));
+}
+
+void engine_free(Engine *e)
+{
+    engine_clear(e);
+    free(e->games);
+    packs_free(&e->ix);
+    free(e->slavebuf);
+    free(e->pattern);
+    memset(e, 0, sizeof(*e));
+}
+
+/* ---- the pack lists ----------------------------------------------------- */
+
+static int cur_set;
+
 static int add_rom(void *ctx, const char *folder, const char *name,
                    unsigned long size, unsigned long crc)
 {
-    return packs_add((PackIndex *)ctx, folder, name, size, crc) != 0;
+    PackIndex *ix = (PackIndex *)ctx;
+    if (packs_add(ix, folder, name, size, crc))
+        return 1;
+    ix->packs[ix->n - 1].set = cur_set;
+    return 0;
 }
 
-static int parse_zip(Engine *e, const unsigned char *zip, unsigned long len)
+/* The zip's real name for set s in the server's folder list: HTML (a link
+ * with %20 for spaces and &amp; for &) or an FTP name list. */
+static int find_zipname(const char *list, int html, int s, char *want, int size)
 {
-    int rc;
-    packs_free(&e->ix);
-    packs_init(&e->ix);
-    e->have_dat = 0;
-    rc = dat_from_zip(zip, len, add_rom, &e->ix, e->datdate);
-    if (rc == 0 && e->ix.n < 100)
-        rc = -1;
-    if (rc == 0 && packs_finish(&e->ix))
-        rc = -2;
-    if (rc == 0)
-        e->have_dat = 1;
+    char pat[160], name[200];
+    const char *zn = pack_sets[s].zipname, *p, *q;
+    int n = 0;
+    if (html) {
+        for (; *zn && n < (int)sizeof(pat) - 8; zn++) {
+            if (*zn == ' ') { memcpy(pat + n, "%20", 3); n += 3; }
+            else if (*zn == '&') { memcpy(pat + n, "&amp;", 5); n += 5; }
+            else pat[n++] = *zn;
+        }
+        pat[n] = 0;
+    } else {
+        set_str(pat, sizeof(pat), zn);
+    }
+    if (!(p = strstr(list, pat)) || !(q = strstr(p, ".zip")) || q - p > 180)
+        return 0;
+    memcpy(name, p, q + 4 - p);
+    name[q + 4 - p] = 0;
+    if (html)
+        url_decode(name, want, size);
+    else
+        set_str(want, size, name);
+    return 1;
+}
+
+static void date_of(const char *zipname, char *date)
+{
+    const char *p = strrchr(zipname, '(');
+    if (p && strlen(p) >= 11 && strncmp(p + 1, date, 10) > 0) {
+        memcpy(date, p + 1, 10);
+        date[10] = 0;
+    }
+}
+
+/* One set: the zip named want (fetch it unless it is the saved one), into
+ * the index. 0 = added. */
+static int load_set(Engine *e, int s, const char *want, int offline)
+{
+    const Prefs *pr = &e->prefs;
+    char cname[120], czip[120], path[500], enc[300];
+    unsigned long len = 0, clen;
+    unsigned char *zip = NULL, *saved;
+    int rc, fetched = 0;
+
+    snprintf(cname, sizeof(cname), CACHEDIR "/%s.name", pack_sets[s].key);
+    snprintf(czip, sizeof(czip), CACHEDIR "/%s.zip", pack_sets[s].key);
+    saved = load_file(cname, &clen, 300);  /* (0.1-0.4 saved Games under the same names) */
+    if (!offline && want[0] && !(saved && !strcmp((char *)saved, want))) {
+        say("Fetching the %s pack list...", pack_sets[s].label);
+        if (!pr->ftp_only) {
+            url_encode(pr->webdir, path, sizeof(path));
+            url_encode(want, enc, sizeof(enc));
+            strncat(path, enc, sizeof(path) - strlen(path) - 1);
+            zip = http_get(pr->host, path, &len, MAXZIP);
+        }
+        if (!zip) {
+            snprintf(path, sizeof(path), "%s%s", pr->ftpdir, want);
+            if (!pr->ftp_only)
+                say("Trying FTP instead...");
+            zip = ftp_get(pr->host, path, &len, MAXZIP);
+        }
+        fetched = zip != NULL;
+    }
+    if (!zip)
+        zip = load_file(czip, &len, MAXZIP);
+    if (!zip) {
+        free(saved);
+        say("No %s pack list: none saved and none downloaded.", pack_sets[s].label);
+        return -1;
+    }
+    cur_set = s;
+    rc = dat_from_zip(zip, len, add_rom, &e->ix, path);   /* path: its <date> */
+    if (rc == 0 && fetched) {
+        BPTR l = CreateDir((STRPTR)CACHEDIR);
+        if (l)
+            UnLock(l);
+        if (!save_file(czip, zip, len) || !save_file(cname, want, strlen(want)))
+            say("Note: could not save the pack list in %s", CACHEDIR);
+    }
+    if (rc == 0) {
+        if (strlen(path) == 10 && strcmp(path, e->datdate) > 0)
+            strcpy(e->datdate, path);
+        else if (want[0])
+            date_of(want, e->datdate);
+    } else {
+        say("The %s pack list is damaged (%d).", pack_sets[s].label, rc);
+    }
+    free(zip);
+    free(saved);
     return rc;
 }
 
-/* Find the newest Games DAT on the server; fetch it unless the cached one
- * is it. The index page is 7 KB; the zip is only fetched when it changed. */
 int engine_dat(Engine *e, int offline)
 {
-    unsigned long len = 0, clen = 0;
-    unsigned char *zip = NULL, *cname;
-    char want[160], path[400];
-    int rc;
+    const Prefs *pr = &e->prefs;
+    char *list = NULL, wants[NSETS][200];
+    unsigned long len;
+    int s, html = 1, loaded = 0;
 
-    /* want = the zip's real name, "Commodore Amiga - WHDLoad - Games (2026-10-28).zip" */
-    want[0] = 0;
-    cname = load_file(CACHE_NAME, &clen, 200);
+    match_allowed = pr->allowed;
+    ftp_login(pr->user, pr->pass);
+    memset(wants, 0, sizeof(wants));
     if (!offline && SocketBase) {
-        unsigned long ilen;
-        unsigned char *index;
-        const char *p, *q;
-        say("Looking for a new pack list...");
-        url_encode(PACKDIR, path, sizeof(path));
-        index = e->ftp_only ? NULL : http_get(HOST, path, &ilen, 256 * 1024);
-        if (index) {
-            /* href="Commodore%20Amiga%20-%20WHDLoad%20-%20Games%20(2026-10-28).zip" */
-            char enc[120], name[160];
-            url_encode(SETNAME, enc, sizeof(enc));
-            p = strstr((char *)index, enc);
-            if (p && (q = strstr(p, ".zip\"")) != NULL && q - p < 150) {
-                memcpy(name, p, q + 4 - p);
-                name[q + 4 - p] = 0;
-                url_decode(name, want, sizeof(want));
-            }
-            free(index);
+        char path[400];
+        say("Looking for new pack lists on %s...", pr->host);
+        if (!pr->ftp_only) {
+            url_encode(pr->webdir, path, sizeof(path));
+            list = (char *)http_get(pr->host, path, &len, 256 * 1024);
         }
-        if (!want[0]) {
-            if (!e->ftp_only)
+        if (!list) {
+            if (!pr->ftp_only)
                 say("Trying FTP instead...");
-            index = ftp_list(HOST, FTPDIR, &ilen, 256 * 1024);
-            /* one name per line: "Commodore Amiga - WHDLoad - Games (2026-10-28).zip" */
-            if (index && (p = strstr((char *)index, SETNAME)) != NULL &&
-                (q = strstr(p, ".zip")) != NULL && q - p < 150) {
-                memcpy(want, p, q + 4 - p);
-                want[q + 4 - p] = 0;
-            }
-            free(index);
+            list = (char *)ftp_list(pr->host, pr->ftpdir, &len, 256 * 1024);
+            html = 0;
         }
-        if (!want[0])
-            say("Could not read the pack list on %s; using the saved one.", HOST);
-    }
-    if (want[0] && !(cname && !strcmp((char *)cname, want))) {
-        char enc[200];
-        url_encode(PACKDIR, path, sizeof(path));
-        url_encode(want, enc, sizeof(enc));
-        strncat(path, enc, sizeof(path) - strlen(path) - 1);
-        say("Fetching the new pack list...");
-        zip = e->ftp_only ? NULL : http_get(HOST, path, &len, MAXZIP);
-        if (!zip) {
-            snprintf(path, sizeof(path), "%s%s", FTPDIR, want);
-            if (!e->ftp_only)
-                say("Trying FTP instead...");
-            zip = ftp_get(HOST, path, &len, MAXZIP);
-        }
-        if (zip) {
-            rc = parse_zip(e, zip, len);
-            if (rc == 0) {
-                BPTR l = CreateDir((STRPTR)CACHEDIR);
-                if (l)
-                    UnLock(l);
-                if (!save_file(CACHE_ZIP, zip, len) || !save_file(CACHE_NAME, want, strlen(want)))
-                    say("Note: could not save the pack list in %s", CACHEDIR);
-                free(zip);
-                free(cname);
-                say("Pack list of %s: %d packs.", e->datdate, e->ix.n);
-                return 0;
-            }
-            say("The downloaded pack list is damaged (%d); using the saved one.", rc);
-            free(zip);
+        if (list) {
+            for (s = 0; s < NSETS; s++)
+                if (pr->sets & (1UL << s))
+                    find_zipname(list, html, s, wants[s], sizeof(wants[s]));
+            free(list);
+        } else {
+            say("Could not read the pack lists on %s; using the saved ones.", pr->host);
         }
     }
-    free(cname);
-    if (e->have_dat && !want[0])
-        return 0;                         /* keep the one already read */
-    zip = load_file(CACHE_ZIP, &len, MAXZIP);
-    if (!zip) {
-        say("No pack list: none saved in %s and none downloaded.", CACHEDIR);
+    packs_free(&e->ix);
+    packs_init(&e->ix);
+    e->have_dat = 0;
+    e->dat_sets = 0;
+    e->datdate[0] = 0;
+    for (s = 0; s < NSETS; s++) {
+        if (!(pr->sets & (1UL << s)))
+            continue;
+        if (load_set(e, s, wants[s], offline || !SocketBase) == 0) {
+            e->dat_sets |= 1UL << s;
+            loaded++;
+        }
+        if (break_pressed())
+            return -1;
+    }
+    if (!loaded || packs_finish(&e->ix)) {
+        say("No pack list to check against.");
         return -1;
     }
-    rc = parse_zip(e, zip, len);
-    free(zip);
-    if (rc) {
-        say("The saved pack list is damaged (%d).", rc);
-        return -1;
-    }
-    say("Pack list of %s: %d packs.", e->datdate, e->ix.n);
+    e->have_dat = 1;
+    say("Pack lists of %s: %d packs.", e->datdate[0] ? e->datdate : "?", e->ix.n);
     return 0;
 }
 
@@ -313,8 +462,20 @@ static int on_game(void *ctx, const char *path, const char *name, const char *sl
     return break_pressed();
 }
 
-int engine_scan(Engine *e, const char *root, int depth)
+static unsigned long family_sets(const Engine *e, int fam)
 {
+    unsigned long bits = 0;
+    int s;
+    for (s = 0; s < NSETS; s++)
+        if (fam < 0 || pack_sets[s].family == fam)
+            bits |= 1UL << s;
+    return bits & e->dat_sets;
+}
+
+int engine_scan(Engine *e, const char *root, int depth, int fam)
+{
+    match_sets = family_sets(e, fam);
+    match_allowed = e->prefs.allowed;
     if (!strcmp(root, "ALL") || !strcmp(root, "all")) {
         char *vols = volume_list(), *v, *w;
         int rc = 0;
@@ -330,6 +491,31 @@ int engine_scan(Engine *e, const char *root, int depth)
         return rc;
     }
     return scan_tree(root, depth, on_game, e);
+}
+
+int engine_scan_all(Engine *e, int depth)
+{
+    int f;
+    for (f = 0; f < NFAMS; f++) {
+        char dirs[400], *d, *next;
+        if (!family_sets(e, f))
+            continue;                         /* none of its sets in use */
+        set_str(dirs, sizeof(dirs), e->prefs.dirs[f]);
+        for (d = dirs; d && *d; d = next) {
+            next = strchr(d, ';');
+            if (next)
+                *next++ = 0;
+            while (*d == ' ')
+                d++;
+            if (!*d)
+                continue;
+            switch (engine_scan(e, d, depth, f)) {
+            case -1: say("Cannot find %s", d); break;
+            case -2: return -2;
+            }
+        }
+    }
+    return 0;
 }
 
 BPTR engine_open_log(void)
@@ -351,12 +537,13 @@ int engine_update(Engine *e, Game *g, BPTR log)
         return -1;
     }
     memset(&c, 0, sizeof(c));
-    c.host = HOST;
-    c.webdir = PACKDIR;
-    c.ftpdir = FTPDIR;
-    c.setdir = SETDIR;
-    c.ftp_only = e->ftp_only;
+    c.host = e->prefs.host;
+    c.webdir = e->prefs.webdir;
+    c.ftpdir = e->prefs.ftpdir;
+    c.setdir = pack_sets[g->pack->set].dir;
+    c.ftp_only = e->prefs.ftp_only;
     c.log = log;
+    ftp_login(e->prefs.user, e->prefs.pass);
     rc = update_game(&c, g->path, g->pack, g->installed);
     if (rc == 0) {
         e->st[g->status]--;

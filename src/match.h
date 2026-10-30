@@ -17,7 +17,8 @@ typedef struct {
     const char *full;      /* "1869de" - base + tokens, letters/digits only */
     const char *base;      /* "1869" */
     const char *tokens;    /* "de" */
-    int foreign;           /* has a language / machine / TV-system variant */
+    unsigned long vbits;   /* the variant words in its name (variant_words[]) */
+    int set;               /* which pack set it is from (engine.c) */
     unsigned long size, crc;
 } Pack;
 
@@ -37,6 +38,22 @@ typedef struct {
     const Pack *newest;
     char installed[16];    /* installed version, "" if the slave doesn't say */
 } Match;
+
+/* The variant words pack names carry (De, AGA, CD32, ...), each a bit in
+ * Pack.vbits. The Languages and Systems pages of the window set which of
+ * them a drawer that names no variant may be given (match_allowed); a
+ * drawer that names one ("1869De") always gets that one. */
+typedef struct {
+    const char *word;      /* as in the name, lower case: "de" */
+    const char *label;     /* for the settings page: "German" */
+    int system;            /* 0 = a language, 1 = a machine / chipset / TV system */
+} VariantWord;
+extern const VariantWord variant_words[];       /* ends with word NULL */
+extern unsigned long match_allowed;
+/* Which pack sets (bits by Pack.set) a drawer is matched against: games
+ * drawers against the games sets, demo drawers against the demo sets. */
+extern unsigned long match_sets;
+unsigned long variants_default(void);            /* English; AGA, ECS, OCS, NTSC, PAL */
 
 void packs_init(PackIndex *ix);
 int  packs_add(PackIndex *ix, const char *folder, const char *file,

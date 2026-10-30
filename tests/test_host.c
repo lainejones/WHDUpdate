@@ -31,6 +31,7 @@ static unsigned char *load(const char *fn, long *len)
 
 static void units(void)
 {
+    match_allowed = variants_default();
     char out[64];
     CHECK(version_cmp("1.2", "1.10") == VERSION_UNSURE);
     CHECK(version_cmp("1.51", "1.6") == VERSION_UNSURE);
@@ -134,6 +135,15 @@ static void units(void)
         CHECK(m.newest && !strcmp(m.newest->file, "Lemmings2_v1.8_1MB_NTSC_1976.lha"));
         match_game(&ix, "F1WorldChampionshipEd", "F1.slave", &si, &m);
         CHECK(m.newest && !strcmp(m.newest->file, "F1WorldChampionshipEdition_v1.0_2061.lha"));
+        /* a pack set not in use is not matched against */
+        ix.packs[0].set = 1;                 /* 1869_v1.0_AGA from another set */
+        match_sets = 1;
+        match_game(&ix, "1869AGA", "1869.slave", &si, &m);
+        CHECK(!m.newest || strcmp(m.newest->file, "1869_v1.0_AGA.lha"));
+        match_sets = 3;
+        match_game(&ix, "1869AGA", "1869.slave", &si, &m);
+        CHECK(m.newest && !strcmp(m.newest->file, "1869_v1.0_AGA.lha"));
+        match_sets = 0xffffffffUL;
         si.version[0] = 0;
         match_game(&ix, "Nothing", "Nothing.slave", &si, &m);
         CHECK(m.status == M_NOMATCH);

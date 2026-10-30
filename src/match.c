@@ -37,19 +37,46 @@ static int is_version_tok(const char *t, int len)
     return i == len ? vlen : 0;
 }
 
-/* Variants a drawer has to name to be one: other languages, other
- * machines. NTSC is not on it: for many games the NTSC release is the only
- * pack there is, and it runs on a PAL machine. Neither are chipset and memory
- * variants (AGA, 1MB, ...): those may well be what an unlabelled drawer holds. */
-static int is_foreign_tok(const char *t)
+const VariantWord variant_words[] = {
+    {"en", "English", 0},     {"de", "German", 0},     {"fr", "French", 0},
+    {"it", "Italian", 0},     {"es", "Spanish", 0},    {"pl", "Polish", 0},
+    {"cz", "Czech", 0},       {"dk", "Danish", 0},     {"fi", "Finnish", 0},
+    {"gr", "Greek", 0},       {"nl", "Dutch", 0},      {"no", "Norwegian", 0},
+    {"pt", "Portuguese", 0},  {"se", "Swedish", 0},    {"sv", "Swedish", 0},
+    {"hu", "Hungarian", 0},   {"tr", "Turkish", 0},    {"ru", "Russian", 0},
+    {"multi", "Multi-language", 0},
+    {"aga", "AGA", 1},        {"ecs", "ECS", 1},       {"ocs", "OCS", 1},
+    {"ntsc", "NTSC", 1},      {"pal", "PAL", 1},       {"cd32", "CD32", 1},
+    {"cdtv", "CDTV", 1},      {"cd", "CD-ROM", 1},     {"arcadia", "Arcadia", 1},
+    {"demo", "Demo versions", 1}, {"preview", "Demo versions", 1},
+    {NULL, NULL, 0}};
+
+/* By default an unlabelled drawer may get an English pack, any chipset and
+ * NTSC (for many games the NTSC release is the only pack, and it runs on a
+ * PAL machine) - but no other language, no CD32/CDTV/Arcadia and no demo. */
+unsigned long variants_default(void)
 {
-    static const char *const words[] = {
-        "de", "fr", "it", "es", "pl", "cz", "dk", "fi", "gr", "nl", "no", "pt", "se", "sv",
-        "hu", "tr", "ru", "multi", "cd32", "cdtv", "cd", "arcadia", "demo", "preview", 0};
+    static const char *const ok[] = {"en", "aga", "ecs", "ocs", "ntsc", "pal", 0};
+    unsigned long bits = 0;
+    int i, j;
+    for (i = 0; variant_words[i].word; i++)
+        for (j = 0; ok[j]; j++)
+            if (!strcmp(variant_words[i].word, ok[j]))
+                bits |= 1UL << i;
+    return bits;
+}
+
+unsigned long match_allowed = 0xffffffffUL;   /* set from the settings (engine.c) */
+unsigned long match_sets = 0xffffffffUL;
+
+#define IN_SETS(p) ((match_sets >> (p)->set) & 1)
+
+static unsigned long variant_bit(const char *t)
+{
     int i;
-    for (i = 0; words[i]; i++)
-        if (!strcmp(t, words[i]))
-            return 1;
+    for (i = 0; variant_words[i].word; i++)
+        if (!strcmp(t, variant_words[i].word))
+            return 1UL << i;
     return 0;
 }
 
@@ -163,7 +190,8 @@ int packs_add(PackIndex *ix, const char *folder, const char *file,
 {
     char base[128], toks[128], ver[16], tmp[128];
     const char *p, *end;
-    int flen = (int)strlen(file), fdl = (int)strlen(folder), first = 1, foreign = 0;
+    int flen = (int)strlen(file), fdl = (int)strlen(folder), first = 1;
+    unsigned long vbits = 0;
     unsigned long need;
     char *mem;
     Pack *pk;
@@ -198,8 +226,7 @@ int packs_add(PackIndex *ix, const char *folder, const char *file,
             memcpy(tmp, p, len);
             tmp[len] = 0;
             norm_name(tmp, nt, sizeof(nt));
-            if (is_foreign_tok(nt))
-                foreign = 1;
+            vbits |= variant_bit(nt);
             if (strlen(toks) + strlen(nt) < sizeof(toks))
                 strcat(toks, nt);
         }
@@ -222,7 +249,8 @@ int packs_add(PackIndex *ix, const char *folder, const char *file,
     pk = &ix->packs[ix->n++];
     pk->size = size;
     pk->crc = crc;
-    pk->foreign = foreign;
+    pk->vbits = vbits;
+    pk->set = 0;
     pk->file = mem;   strcpy(mem, file);   mem += flen + 1;
     pk->folder = mem; strcpy(mem, folder); mem += fdl + 1;
     pk->ver = mem;    strcpy(mem, ver);    mem += strlen(ver) + 1;
@@ -288,7 +316,7 @@ static int find(const PackIndex *ix, const int *order, int use_base, const char 
 }
 
 #define ANY        ((const char *)0)   /* any variant */
-#define ANY_LOCAL  ((const char *)1)   /* any but other languages/machines */
+#define ANY_LOCAL  ((const char *)1)   /* any whose variants are all allowed */
 
 /* Pick the newest among order[lo..hi); want_tokens = exactly these tokens
  * ("" = the plain pack), or ANY / ANY_LOCAL. */
@@ -300,7 +328,9 @@ static const Pack *newest(const PackIndex *ix, const int *order, int lo, int hi,
     int nseen = 0, i, j;
     for (i = lo; i < hi; i++) {
         const Pack *p = &ix->packs[order[i]];
-        if (want_tokens == ANY_LOCAL ? p->foreign
+        if (!IN_SETS(p))
+            continue;
+        if (want_tokens == ANY_LOCAL ? (p->vbits & ~match_allowed) != 0
             : want_tokens != ANY && strcmp(p->tokens, want_tokens) &&
               !(*want_tokens && same_letters(p->tokens, want_tokens)))
             continue;
@@ -328,7 +358,7 @@ static const Pack *newest_part(const PackIndex *ix, const int *order, int lo, in
     for (i = lo; i < hi; i++) {
         const Pack *p = &ix->packs[order[i]];
         int tl = (int)strlen(p->tokens);
-        if (!tl || tl < bestlen || strncmp(suffix, p->tokens, tl) || !all_variant(suffix + tl))
+        if (!IN_SETS(p) || !tl || tl < bestlen || strncmp(suffix, p->tokens, tl) || !all_variant(suffix + tl))
             continue;
         if (!best || tl > bestlen || version_cmp(p->ver, best->ver) == 1) {
             best = p;
@@ -348,9 +378,10 @@ static const Pack *lookup(const PackIndex *ix, const char *k, int *how, int how_
     const Pack *p;
     if (!*k)
         return 0;
-    if (find(ix, ix->byfull, 0, k, &lo, &hi)) {
+    if (find(ix, ix->byfull, 0, k, &lo, &hi) &&
+        (p = newest(ix, ix->byfull, lo, hi, ANY, variants)) != NULL) {
         *how = how_full;
-        return newest(ix, ix->byfull, lo, hi, ANY, variants);
+        return p;
     }
     if (find(ix, ix->bybase, 1, k, &lo, &hi)) {
         *how = how_base;
@@ -359,7 +390,10 @@ static const Pack *lookup(const PackIndex *ix, const char *k, int *how, int how_
             *variants = 1;
             return p;
         }
-        return newest(ix, ix->bybase, lo, hi, ANY_LOCAL, variants);
+        p = newest(ix, ix->bybase, lo, hi, ANY_LOCAL, variants);
+        if (!p)
+            *how = HOW_NONE;
+        return p;
     }
     return 0;
 }
@@ -416,6 +450,8 @@ static const Pack *abbreviation(const PackIndex *ix, const char *k, int *variant
     for (i = 0; i < ix->n; i++) {
         const char *b = ix->packs[ix->bybase[i]].base;
         int bl = (int)strlen(b);
+        if (!IN_SETS(&ix->packs[ix->bybase[i]]))
+            continue;
         if (strncmp(b, stem, 4) || bl <= sl || sl * 2 < bl || !is_subseq(stem, b) ||
             (sl < 10 && !strncmp(b, stem, sl)))
             continue;                   /* Apache is not short for ApacheFlight, but
@@ -467,6 +503,8 @@ void match_game(const PackIndex *ix, const char *drawer, const char *slavefile,
         for (i = 0; i < ix->n; i++) {
             const char *b = ix->packs[ix->bybase[i]].base;
             int bl = (int)strlen(b);
+            if (!IN_SETS(&ix->packs[ix->bybase[i]]))
+                continue;
             if (bl >= 5 && bl > blen && bl < kl && !strncmp(k, b, bl) && all_variant(k + bl)) {
                 best = i;
                 blen = bl;

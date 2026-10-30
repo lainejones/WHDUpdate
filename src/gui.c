@@ -37,12 +37,12 @@
 #include "match.h"
 #include "amiga.h"
 #include "engine.h"
+#include "guiprefs.h"
 
 struct IntuitionBase *IntuitionBase = NULL;
 struct GfxBase *GfxBase = NULL;
 struct Library *GadToolsBase = NULL;
 
-#define DIRSVAR "WHDUpdate.dirs"
 #define M 6                       /* margin */
 #define GAP 4
 
@@ -50,6 +50,25 @@ enum { G_DIRS, G_CHECK, G_FIND, G_SUMMARY, G_SHOW, G_LIST, G_UPDATE, G_MARKALL, 
        G_STATUS, G_COUNT };
 
 static const char *show_labels[] = {"Updates", "All games", "To check", "Not found", "No version", NULL};
+
+enum { MN_CHECK = 1, MN_UPDATE, MN_ABOUT, MN_QUIT, MN_SERVER, MN_SETS, MN_LANG, MN_SYS, MN_FTPONLY };
+
+static struct NewMenu menu_def[] = {
+    {NM_TITLE, (STRPTR)"Project", NULL, 0, 0, NULL},
+    {NM_ITEM, (STRPTR)"Check", (STRPTR)"C", 0, 0, (APTR)MN_CHECK},
+    {NM_ITEM, (STRPTR)"Update marked", (STRPTR)"U", 0, 0, (APTR)MN_UPDATE},
+    {NM_ITEM, NM_BARLABEL, NULL, 0, 0, NULL},
+    {NM_ITEM, (STRPTR)"About...", NULL, 0, 0, (APTR)MN_ABOUT},
+    {NM_ITEM, NM_BARLABEL, NULL, 0, 0, NULL},
+    {NM_ITEM, (STRPTR)"Quit", (STRPTR)"Q", 0, 0, (APTR)MN_QUIT},
+    {NM_TITLE, (STRPTR)"Settings", NULL, 0, 0, NULL},
+    {NM_ITEM, (STRPTR)"Server...", (STRPTR)"S", 0, 0, (APTR)MN_SERVER},
+    {NM_ITEM, (STRPTR)"Pack sets...", (STRPTR)"P", 0, 0, (APTR)MN_SETS},
+    {NM_ITEM, (STRPTR)"Languages...", (STRPTR)"L", 0, 0, (APTR)MN_LANG},
+    {NM_ITEM, (STRPTR)"Systems...", (STRPTR)"Y", 0, 0, (APTR)MN_SYS},
+    {NM_ITEM, NM_BARLABEL, NULL, 0, 0, NULL},
+    {NM_ITEM, (STRPTR)"Use FTP only", NULL, CHECKIT | MENUTOGGLE, 0, (APTR)MN_FTPONLY},
+    {NM_END, NULL, NULL, 0, 0, NULL}};
 
 static struct TextAttr topaz8 = {(STRPTR)"topaz.font", 8, FS_NORMAL, FPF_ROMFONT};
 
@@ -68,6 +87,7 @@ static struct {
     long top;                     /* the list's scroll position */
     char dirs[400], status[200], summary[120];
     char find[40];                /* part of a name: only those games are shown */
+    struct Menu *menu;
 } G;
 
 /* ---- small helpers ------------------------------------------------------ */
@@ -86,32 +106,16 @@ static int tlen(const char *s)
 
 static int bh(void) { return G.font->tf_YSize + 6; }
 
+/* The Drawers field is the games' drawers in the settings. */
 static void load_dirs(void)
 {
-    BPTR f = Open((STRPTR)"ENV:" DIRSVAR, MODE_OLDFILE);
-    LONG n;
-    if (!f)
-        f = Open((STRPTR)"ENVARC:" DIRSVAR, MODE_OLDFILE);
-    if (!f)
-        return;
-    n = Read(f, G.dirs, sizeof(G.dirs) - 1);
-    Close(f);
-    G.dirs[n > 0 ? n : 0] = 0;
-    while (n > 0 && (G.dirs[n - 1] == '\n' || G.dirs[n - 1] == ' '))
-        G.dirs[--n] = 0;
+    strncpy(G.dirs, G.e->prefs.dirs[FAM_GAMES], sizeof(G.dirs) - 1);
 }
 
 static void save_dirs(void)
 {
-    static const char *where[] = {"ENV:" DIRSVAR, "ENVARC:" DIRSVAR};
-    int i;
-    for (i = 0; i < 2; i++) {
-        BPTR f = Open((STRPTR)where[i], MODE_NEWFILE);
-        if (f) {
-            Write(f, G.dirs, strlen(G.dirs));
-            Close(f);
-        }
-    }
+    strncpy(G.e->prefs.dirs[FAM_GAMES], G.dirs, sizeof(G.e->prefs.dirs[0]) - 1);
+    prefs_save(&G.e->prefs);
 }
 
 /* ---- the list ------------------------------------------------------------ */
@@ -463,11 +467,10 @@ static int cmp_games(const void *a, const void *b)
 static void do_check(void)
 {
     Engine *e = G.e;
-    char *d, *next, dirs[400];
     int stopped = 0;
 
     strcpy(G.dirs, (char *)((struct StringInfo *)G.g[G_DIRS]->SpecialInfo)->Buffer);
-    if (!G.dirs[0]) {
+    if (!G.dirs[0] && !e->prefs.dirs[FAM_DEMOS][0] && !e->prefs.dirs[FAM_MAGS][0]) {
         gui_status("Type the drawers your games are in (Games: or Games:;Games2:), then Check");
         return;
     }
@@ -481,20 +484,7 @@ static void do_check(void)
     attach_list();
     set_summary();
     if (engine_dat(e, 0) == 0) {
-        strcpy(dirs, G.dirs);
-        for (d = dirs; d && *d && !stopped; d = next) {
-            next = strchr(d, ';');
-            if (next)
-                *next++ = 0;
-            while (*d == ' ')
-                d++;
-            if (!*d)
-                continue;
-            switch (engine_scan(e, d, 3)) {
-            case -1: say("Cannot find %s", d); Delay(100); break;
-            case -2: stopped = 1; break;
-            }
-        }
+        stopped = engine_scan_all(e, 3) == -2;
         qsort(e->games, e->n, sizeof(Game *), cmp_games);
         if (stopped)
             say("Stopped: %ld games looked at", e->n);
@@ -630,6 +620,82 @@ static int choose_fonts(void)
     return 1;
 }
 
+/* The tick of "Use FTP only" follows the setting. */
+static void sync_ftp_tick(void)
+{
+    struct MenuItem *it = ItemAddress(G.menu, FULLMENUNUM(1, 5, NOSUB));
+    if (!it)
+        return;
+    ClearMenuStrip(G.win);
+    if (G.e->prefs.ftp_only)
+        it->Flags |= CHECKED;
+    else
+        it->Flags &= ~CHECKED;
+    ResetMenuStrip(G.win, G.menu);
+}
+
+static void about(void)
+{
+    struct EasyStruct es;
+    memset(&es, 0, sizeof(es));
+    es.es_StructSize = sizeof(es);
+    es.es_Title = (UBYTE *)"About WHDUpdate";
+    es.es_TextFormat = (UBYTE *)"WHDUpdate " WHDU_VERSION "\n"
+        "Keeps your WHDLoad games up to date.\n\n"
+        "The packs are Retroplay's, on %s.\n"
+        "Free software under the GPL-3.0.";
+    es.es_GadgetFormat = (UBYTE *)"OK";
+    EasyRequest(G.win, &es, NULL, (ULONG)G.e->prefs.host);
+}
+
+/* A settings page; after Use the settings are saved and, when there are
+ * results to redo, checked again with them. */
+static void settings(int which)
+{
+    PrefsUI ui;
+    int ok = 0;
+    ui.scr = G.scr;
+    ui.vi = G.vi;
+    ui.ta = &G.ta;
+    ui.parent = G.win;
+    if (IntuitionBase->LibNode.lib_Version >= 39)
+        SetWindowPointer(G.win, WA_BusyPointer, TRUE, TAG_END);
+    switch (which) {
+    case MN_SERVER: ok = prefs_server(&ui, &G.e->prefs); break;
+    case MN_SETS:   ok = prefs_sets(&ui, &G.e->prefs); break;
+    case MN_LANG:   ok = prefs_variants(&ui, &G.e->prefs, 0); break;
+    case MN_SYS:    ok = prefs_variants(&ui, &G.e->prefs, 1); break;
+    }
+    if (IntuitionBase->LibNode.lib_Version >= 39)
+        SetWindowPointer(G.win, TAG_END);
+    if (!ok)
+        return;
+    prefs_save(&G.e->prefs);
+    sync_ftp_tick();
+    if (G.e->n || which == MN_SETS)
+        do_check();                   /* the list with the new settings */
+    else
+        gui_status("Settings saved");
+}
+
+static void do_menu(ULONG id, struct MenuItem *it)
+{
+    switch (id) {
+    case MN_CHECK:  do_check(); break;
+    case MN_UPDATE: do_update(); break;
+    case MN_ABOUT:  about(); break;
+    case MN_QUIT:   G.quit = 1; break;
+    case MN_FTPONLY:
+        G.e->prefs.ftp_only = (it->Flags & CHECKED) != 0;
+        prefs_save(&G.e->prefs);
+        gui_status(G.e->prefs.ftp_only ? "Pack lists and packs come by FTP" :
+                   "Pack lists and packs come by HTTP, FTP if that fails");
+        break;
+    default:
+        settings((int)id);
+    }
+}
+
 int gui_main(struct Engine *e, const char *dirs)
 {
     int width, height, minw, minh, maxh;
@@ -644,9 +710,8 @@ int gui_main(struct Engine *e, const char *dirs)
     if (!IntuitionBase || !GfxBase || !GadToolsBase)
         goto done;
     if (dirs)
-        strncpy(G.dirs, dirs, sizeof(G.dirs) - 1);
-    else
-        load_dirs();
+        strncpy(e->prefs.dirs[FAM_GAMES], dirs, sizeof(e->prefs.dirs[0]) - 1);
+    load_dirs();
     if (!(G.scr = LockPubScreen(NULL)) || !(G.vi = GetVisualInfo(G.scr, TAG_END)) || !choose_fonts())
         goto done;
 
@@ -672,15 +737,20 @@ int gui_main(struct Engine *e, const char *dirs)
         WA_DragBar, TRUE, WA_DepthGadget, TRUE, WA_CloseGadget, TRUE, WA_SizeGadget, TRUE,
         WA_SizeBBottom, TRUE, WA_Activate, TRUE, WA_SimpleRefresh, TRUE, WA_NewLookMenus, TRUE,
         WA_IDCMP, BUTTONIDCMP | LISTVIEWIDCMP | STRINGIDCMP | CYCLEIDCMP | IDCMP_CLOSEWINDOW |
-                  IDCMP_NEWSIZE | IDCMP_REFRESHWINDOW | IDCMP_INTUITICKS,
+                  IDCMP_NEWSIZE | IDCMP_REFRESHWINDOW | IDCMP_INTUITICKS | IDCMP_MENUPICK,
         TAG_END);
     if (!G.win)
         goto done;
+    if ((G.menu = CreateMenus(menu_def, TAG_END)) != NULL) {
+        if (LayoutMenus(G.menu, G.vi, GTMN_NewLookMenus, TRUE, TAG_END))
+            SetMenuStrip(G.win, G.menu);
+        sync_ftp_tick();
+    }
     set_summary();
     gui_status(G.dirs[0] ? "Checking..." :
                "Type the drawers your games are in (Games: or Games:;Games2:), then Check");
     relayout();
-    if (G.dirs[0])
+    if (G.dirs[0] || e->prefs.dirs[FAM_DEMOS][0] || e->prefs.dirs[FAM_MAGS][0])
         do_check();                   /* the drawers are known: check right away */
 
     while (!G.quit) {
@@ -694,6 +764,15 @@ int gui_main(struct Engine *e, const char *dirs)
             switch (cl) {
             case IDCMP_CLOSEWINDOW:
                 G.quit = 1;
+                break;
+            case IDCMP_MENUPICK:
+                while (code != MENUNULL && !G.quit) {
+                    struct MenuItem *it = ItemAddress(G.menu, code);
+                    if (!it)
+                        break;
+                    do_menu((ULONG)GTMENUITEM_USERDATA(it), it);
+                    code = it->NextSelect;
+                }
                 break;
             case IDCMP_INTUITICKS:            /* the list follows the Find field as you type */
                 if (!G.busy)
@@ -753,8 +832,12 @@ int gui_main(struct Engine *e, const char *dirs)
 done:
     if (G.win) {
         detach_list();
+        if (G.menu)
+            ClearMenuStrip(G.win);
         CloseWindow(G.win);
     }
+    if (G.menu)
+        FreeMenus(G.menu);
     if (G.glist)
         FreeGadgets(G.glist);
     if (G.font)
