@@ -12,6 +12,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
+#include <sys/ioctl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +21,9 @@
 #include "dat.h"
 
 #define TIMEOUT_SECS 30
+#ifndef EINPROGRESS
+#define EINPROGRESS 36
+#endif
 
 void url_encode(const char *in, char *out, int size)
 {
@@ -69,28 +73,42 @@ static int same_word(const char *s, const char *word)
     return 1;
 }
 
-/* Wait until fd is readable (1), the timeout passed (0) or Ctrl-C (-1). */
+/* Wait until fd is readable (or writable) - 1, the timeout passed - 0, or
+ * Ctrl-C / Stop in the window - -1. In one-second steps, so the window
+ * keeps answering while the network doesn't. */
+static int wait_fd(LONG fd, int write)
+{
+    int s;
+    for (s = 0; s < TIMEOUT_SECS; s++) {
+        fd_set fds;
+        struct timeval tv;
+        ULONG sigs = SIGBREAKF_CTRL_C;
+        LONG r;
+        FD_ZERO(&fds);
+        FD_SET(fd, &fds);
+        tv.tv_secs = 1;
+        tv.tv_micro = 0;
+        r = WaitSelect(fd + 1, write ? NULL : &fds, write ? &fds : NULL, NULL, &tv, &sigs);
+        if ((sigs & SIGBREAKF_CTRL_C) || break_pressed())
+            return -1;
+        if (r > 0)
+            return 1;
+        if (r < 0)
+            return 0;
+    }
+    return 0;
+}
+
 static int wait_readable(LONG fd)
 {
-    fd_set rfds;
-    struct timeval tv;
-    ULONG sigs = SIGBREAKF_CTRL_C;
-    LONG r;
-    FD_ZERO(&rfds);
-    FD_SET(fd, &rfds);
-    tv.tv_secs = TIMEOUT_SECS;
-    tv.tv_micro = 0;
-    r = WaitSelect(fd + 1, &rfds, NULL, NULL, &tv, &sigs);
-    if (sigs & SIGBREAKF_CTRL_C)
-        return -1;
-    return r > 0 ? 1 : 0;
+    return wait_fd(fd, 0);
 }
 
 static int resolve(const char *host, ULONG *addr)
 {
     struct hostent *he = gethostbyname((STRPTR)host);
     if (!he || !he->h_addr_list || !he->h_addr_list[0]) {
-        printf("WHDUpdate: cannot find %s (no network?)\n", host);
+        say("WHDUpdate: cannot find %s (no network?)", host);
         return 0;
     }
     *addr = *(ULONG *)he->h_addr_list[0];
@@ -100,7 +118,7 @@ static int resolve(const char *host, ULONG *addr)
 static LONG tcp_connect(ULONG addr, int port)
 {
     volatile UBYTE sabuf[16];
-    LONG fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP), i;
+    LONG fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP), i, one;
     if (fd < 0)
         return -1;
     /* Byte by byte and volatile: with -O2 this compiler merges the small
@@ -111,10 +129,21 @@ static LONG tcp_connect(ULONG addr, int port)
     sabuf[2] = (UBYTE)(port >> 8);  sabuf[3] = (UBYTE)port;
     sabuf[4] = (UBYTE)(addr >> 24); sabuf[5] = (UBYTE)(addr >> 16);
     sabuf[6] = (UBYTE)(addr >> 8);  sabuf[7] = (UBYTE)addr;
+    /* Non-blocking, so a server that never answers costs TIMEOUT_SECS and
+     * not the stack's own (minutes long) connect timeout. */
+    one = 1;
+    IoctlSocket(fd, FIONBIO, (char *)&one);
     if (connect(fd, (struct sockaddr *)sabuf, 16) < 0) {
-        CloseSocket(fd);
-        return -1;
+        LONG err = 0;
+        socklen_t len = sizeof(err);
+        if (Errno() != EINPROGRESS || wait_fd(fd, 1) != 1 ||
+            getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err) {
+            CloseSocket(fd);
+            return -1;
+        }
     }
+    one = 0;
+    IoctlSocket(fd, FIONBIO, (char *)&one);
     return fd;
 }
 
@@ -138,12 +167,12 @@ static unsigned char *recv_all(LONG fd, unsigned long maxlen, unsigned long *len
             if (nc > maxlen + 65536)
                 nc = maxlen + 65536;
             if (have + 8193 > nc) {
-                printf("WHDUpdate: the download is larger than expected\n");
+                say("WHDUpdate: the download is larger than expected");
                 goto fail;
             }
             nb = (unsigned char *)realloc(buf, nc);
             if (!nb) {
-                printf("WHDUpdate: out of memory while downloading\n");
+                say("WHDUpdate: out of memory while downloading");
                 goto fail;
             }
             buf = nb;
@@ -151,16 +180,16 @@ static unsigned char *recv_all(LONG fd, unsigned long maxlen, unsigned long *len
         }
         w = wait_readable(fd);
         if (w < 0) {
-            printf("WHDUpdate: stopped\n");
+            say("WHDUpdate: stopped");
             goto fail;
         }
         if (w == 0) {
-            printf("WHDUpdate: the server stopped answering\n");
+            say("WHDUpdate: the server stopped answering");
             goto fail;
         }
         n = recv(fd, buf + have, 8192, 0);
         if (n < 0) {
-            printf("WHDUpdate: the connection broke\n");
+            say("WHDUpdate: the connection broke");
             goto fail;
         }
         if (n == 0)
@@ -190,14 +219,14 @@ unsigned char *http_get(const char *host, const char *path,
         return NULL;
     fd = tcp_connect(addr, 80);
     if (fd < 0) {
-        printf("WHDUpdate: cannot connect to %s\n", host);
+        say("WHDUpdate: cannot connect to %s", host);
         return NULL;
     }
     snprintf(req, sizeof(req),
              "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: WHDUpdate/" WHDU_VERSION " (AmigaOS)\r\n"
              "Connection: close\r\n\r\n", path, host);
     if (!send_all(fd, req)) {
-        printf("WHDUpdate: sending the request failed\n");
+        say("WHDUpdate: sending the request failed");
         CloseSocket(fd);
         return NULL;
     }
@@ -208,7 +237,7 @@ unsigned char *http_get(const char *host, const char *path,
 
     body = (unsigned char *)strstr((char *)buf, "\r\n\r\n");
     if (!body || strncmp((char *)buf, "HTTP/1.", 7)) {
-        printf("WHDUpdate: %s sent no proper reply\n", host);
+        say("WHDUpdate: %s sent no proper reply", host);
         goto fail;
     }
     hdrlen = body + 4 - buf;
@@ -219,12 +248,12 @@ unsigned char *http_get(const char *host, const char *path,
             got_clen = 1;
         }
     if (status != 200) {
-        printf("WHDUpdate: %s answered %ld\n", host, (long)status);
+        say("WHDUpdate: %s answered %ld", host, (long)status);
         goto fail;
     }
     *len = have - hdrlen;
     if (got_clen && clen != *len) {
-        printf("WHDUpdate: the download stopped early (%lu of %lu bytes)\n", *len, clen);
+        say("WHDUpdate: the download stopped early (%lu of %lu bytes)", *len, clen);
         goto fail;
     }
     memmove(buf, buf + hdrlen, *len + 1);
@@ -301,7 +330,7 @@ static unsigned char *ftp_fetch(const char *host, const char *path, int list,
         return NULL;
     cfd = tcp_connect(addr, 21);
     if (cfd < 0) {
-        printf("WHDUpdate: cannot connect to %s by FTP\n", host);
+        say("WHDUpdate: cannot connect to %s by FTP", host);
         return NULL;
     }
     if (ftp_reply(cfd, reply, sizeof(reply)) != 220 ||
@@ -309,30 +338,30 @@ static unsigned char *ftp_fetch(const char *host, const char *path, int list,
         (code == 331 && ftp_cmd(cfd, "PASS", "amiga", reply, sizeof(reply)) != 230) ||
         ftp_cmd(cfd, "TYPE", "I", reply, sizeof(reply)) != 200 ||
         ftp_cmd(cfd, "PASV", NULL, reply, sizeof(reply)) != 227) {
-        printf("WHDUpdate: FTP login failed: %s\n", reply);
+        say("WHDUpdate: FTP login failed: %s", reply);
         goto done;
     }
     /* 227 Entering Passive Mode (h1,h2,h3,h4,p1,p2) */
     p = strchr(reply, '(');
     if (!p || sscanf(p + 1, "%d,%d,%d,%d,%d,%d", &h1, &h2, &h3, &h4, &p1, &p2) != 6) {
-        printf("WHDUpdate: odd FTP passive reply: %s\n", reply);
+        say("WHDUpdate: odd FTP passive reply: %s", reply);
         goto done;
     }
     dfd = tcp_connect((ULONG)h1 << 24 | (ULONG)h2 << 16 | (ULONG)h3 << 8 | (ULONG)h4, p1 * 256 + p2);
     if (dfd < 0) {
-        printf("WHDUpdate: cannot open the FTP data connection\n");
+        say("WHDUpdate: cannot open the FTP data connection");
         goto done;
     }
     code = ftp_cmd(cfd, list ? "NLST" : "RETR", path, reply, sizeof(reply));
     if (code != 150 && code != 125) {
-        printf("WHDUpdate: FTP: %s\n", reply);
+        say("WHDUpdate: FTP: %s", reply);
         goto done;
     }
     data = recv_all(dfd, maxlen, len);
     CloseSocket(dfd);
     dfd = -1;
     if (data && ftp_reply(cfd, reply, sizeof(reply)) != 226) {
-        printf("WHDUpdate: FTP transfer incomplete: %s\n", reply);
+        say("WHDUpdate: FTP transfer incomplete: %s", reply);
         free(data);
         data = NULL;
         *len = 0;
@@ -371,34 +400,35 @@ static int recv_to_file(LONG fd, BPTR fh, const unsigned char *first, unsigned l
     for (;;) {
         LONG n, w = wait_readable(fd);
         if (w < 0) {
-            printf("\nWHDUpdate: stopped\n");
+            say("WHDUpdate: stopped");
             return -1;
         }
         if (w == 0) {
-            printf("\nWHDUpdate: the server stopped answering\n");
+            say("WHDUpdate: the server stopped answering");
             return -1;
         }
         n = recv(fd, buf, sizeof(buf), 0);
         if (n < 0) {
-            printf("\nWHDUpdate: the connection broke\n");
+            say("WHDUpdate: the connection broke");
             return -1;
         }
         if (n == 0)
             break;
         if (Write(fh, buf, n) != n) {
-            printf("\nWHDUpdate: cannot write the download (disk full?)\n");
+            say("WHDUpdate: cannot write the download (disk full?)");
             return -1;
         }
         *crc = crc32_update(*crc, buf, n);
         *got += n;
         if (expect && *got - shown >= 65536) {
             shown = *got;
-            printf("\r  %lu of %lu KB", *got / 1024, expect / 1024);
-            fflush(stdout);
+            busy("Downloading: %lu of %lu KB", *got / 1024, expect / 1024);
+            if (break_pressed()) {           /* Stop in the window */
+                say("WHDUpdate: stopped");
+                return -1;
+            }
         }
     }
-    if (shown)
-        printf("\r                              \r");
     return 0;
 }
 
@@ -418,7 +448,7 @@ int http_download(const char *host, const char *path, BPTR fh,
         return -1;
     fd = tcp_connect(addr, 80);
     if (fd < 0) {
-        printf("WHDUpdate: cannot connect to %s\n", host);
+        say("WHDUpdate: cannot connect to %s", host);
         return -1;
     }
     snprintf(req, sizeof(req),
@@ -433,7 +463,7 @@ int http_download(const char *host, const char *path, BPTR fh,
         LONG n;
         if (have >= sizeof(hdr) - 1 || wait_readable(fd) <= 0 ||
             (n = recv(fd, hdr + have, sizeof(hdr) - 1 - have, 0)) <= 0) {
-            printf("WHDUpdate: %s sent no proper reply\n", host);
+            say("WHDUpdate: %s sent no proper reply", host);
             CloseSocket(fd);
             return -1;
         }
@@ -444,7 +474,7 @@ int http_download(const char *host, const char *path, BPTR fh,
     }
     status = strncmp((char *)hdr, "HTTP/1.", 7) ? 0 : atol((char *)hdr + 9);
     if (status != 200) {
-        printf("WHDUpdate: %s answered %ld\n", host, (long)status);
+        say("WHDUpdate: %s answered %ld", host, (long)status);
         CloseSocket(fd);
         return -1;
     }
@@ -468,7 +498,7 @@ int ftp_download(const char *host, const char *path, BPTR fh,
         return -1;
     cfd = tcp_connect(addr, 21);
     if (cfd < 0) {
-        printf("WHDUpdate: cannot connect to %s by FTP\n", host);
+        say("WHDUpdate: cannot connect to %s by FTP", host);
         return -1;
     }
     reply[0] = 0;
@@ -479,7 +509,7 @@ int ftp_download(const char *host, const char *path, BPTR fh,
         ftp_cmd(cfd, "PASV", NULL, reply, sizeof(reply)) != 227 ||
         !(p = strchr(reply, '(')) ||
         sscanf(p + 1, "%d,%d,%d,%d,%d,%d", &h1, &h2, &h3, &h4, &p1, &p2) != 6) {
-        printf("WHDUpdate: FTP login failed: %s\n", reply);
+        say("WHDUpdate: FTP login failed: %s", reply);
         goto done;
     }
     dfd = tcp_connect((ULONG)h1 << 24 | (ULONG)h2 << 16 | (ULONG)h3 << 8 | (ULONG)h4, p1 * 256 + p2);
@@ -487,7 +517,7 @@ int ftp_download(const char *host, const char *path, BPTR fh,
         goto done;
     code = ftp_cmd(cfd, "RETR", path, reply, sizeof(reply));
     if (code != 150 && code != 125) {
-        printf("WHDUpdate: FTP: %s\n", reply);
+        say("WHDUpdate: FTP: %s", reply);
         goto done;
     }
     rc = recv_to_file(dfd, fh, NULL, 0, expect, got, crc);

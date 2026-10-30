@@ -6,6 +6,8 @@
  * says which games have a newer pack. Only with UPDATE does it change
  * anything, and then only the games you say yes to (update.c).
  *
+ * Started from its icon (or with GUI) it opens a window instead (gui.c).
+ *
  *   WHDUpdate Games:            check the games under Games:
  *   WHDUpdate ALL               check every volume
  *   WHDUpdate Games: SHOWALL    list every game, not just the ones to look at
@@ -16,9 +18,12 @@
  *   WHDUpdate Games: UPDATE     update the games with a newer pack, asking
  *                               for each one (YES: without asking)
  *   WHDUpdate Games: GAME=Lotus#?   only the games whose drawer name fits
+ *   WHDUpdate GUI               the window
  *
  * Return code 5 (WARN) when there are updates, 0 when there are none. */
 #include <exec/types.h>
+#include <exec/memory.h>
+#include <exec/tasks.h>
 #include <dos/dos.h>
 #include <dos/rdargs.h>
 #include <proto/exec.h>
@@ -26,288 +31,92 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "slave.h"
-#include "dat.h"
+#include <stdarg.h>
 #include "match.h"
 #include "amiga.h"
-#include "update.h"
-
-#define HOST        "ftp2.grandis.nu"
-#define PACKDIR     "/turran/FTP/Retroplay WHDLoad Packs/"   /* web path */
-#define FTPDIR      "/Retroplay WHDLoad Packs/"              /* the same by FTP */
-#define SETNAME     "Commodore Amiga - WHDLoad - Games ("
-#define CACHEDIR    "PROGDIR:Cache"
-#define CACHE_ZIP   "PROGDIR:Cache/Games.zip"
-#define CACHE_NAME  "PROGDIR:Cache/Games.name"
-#define MAXZIP      (4UL * 1024 * 1024)
-#define SLAVEMAX    65536L
-#define LOGFILE     "PROGDIR:WHDUpdate.log"
-#define SETDIR      "Commodore_Amiga_-_WHDLoad_-_Games"
+#include "engine.h"
 
 static const char verstag[] __attribute__((used)) =
     "$VER: WHDUpdate " WHDU_VERSION " (30.10.2026) WHDLoad game updater";
 
 struct Library *SocketBase = NULL;
+struct Library *IconBase = NULL;
 
-#define TEMPLATE "DIR/M,ALL/S,UPDATE/S,YES/S,GAME/K,SHOWALL/S,REPORT/K,OFFLINE/S,FTP/S,DEPTH/K/N"
+#define TEMPLATE "DIR/M,ALL/S,UPDATE/S,YES/S,GAME/K,SHOWALL/S,REPORT/K,OFFLINE/S,FTP/S,DEPTH/K/N,GUI/S"
 enum { A_DIR, A_ALL, A_UPDATE, A_YES, A_GAME, A_SHOWALL, A_REPORT, A_OFFLINE, A_FTP, A_DEPTH,
-       A_COUNT };
+       A_GUI, A_COUNT };
 
-/* a game with a newer pack, kept for UPDATE */
-typedef struct Todo {
-    struct Todo *next;
-    const Pack *pack;
-    char installed[16];
-    char path[1];
-} Todo;
+static int gui_on;
 
-typedef struct {
-    PackIndex ix;
-    unsigned char *slavebuf;
-    int showall;
-    int ftp_only;
-    BPTR report;
-    long games, st[6];
-    long printed;
-    char *pattern;          /* GAME=, parsed, or NULL */
-    int collect;            /* keep the updates in todo */
-    Todo *todo, **tail;
-} Run;
+/* ---- messages: printed in a Shell, shown on the status line in the window */
+
+void say(const char *fmt, ...)
+{
+    char buf[400];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (gui_on) {
+        gui_status(buf);
+    } else {
+        printf("%s\n", buf);
+        fflush(stdout);
+    }
+}
+
+/* progress that only matters while it happens */
+void busy(const char *fmt, ...)
+{
+    char buf[400];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (gui_on)
+        gui_status(buf);
+}
 
 int break_pressed(void)
 {
+    if (gui_on && gui_poll())
+        return 1;
     return (SetSignal(0, SIGBREAKF_CTRL_C) & SIGBREAKF_CTRL_C) != 0;
 }
 
-/* ---- the DAT -------------------------------------------------------- */
+/* ---- the Shell ------------------------------------------------------- */
 
-static unsigned char *load_file(const char *name, unsigned long *len, unsigned long max)
+typedef struct {
+    int showall;
+    BPTR report;
+} Out;
+
+static void cli_seen(void *ctx, const Game *g)
 {
-    BPTR fh = Open((STRPTR)name, MODE_OLDFILE);
-    unsigned char *buf;
-    LONG size;
-    *len = 0;
-    if (!fh)
-        return NULL;
-    Seek(fh, 0, OFFSET_END);
-    size = Seek(fh, 0, OFFSET_BEGINNING);
-    if (size <= 0 || (unsigned long)size > max || !(buf = (unsigned char *)malloc(size + 1))) {
-        Close(fh);
-        return NULL;
-    }
-    if (Read(fh, buf, size) != size) {
-        Close(fh);
-        free(buf);
-        return NULL;
-    }
-    Close(fh);
-    buf[size] = 0;
-    *len = size;
-    return buf;
-}
-
-static int save_file(const char *name, const void *data, unsigned long len)
-{
-    BPTR fh = Open((STRPTR)name, MODE_NEWFILE);
-    int ok;
-    if (!fh)
-        return 0;
-    ok = Write(fh, (APTR)data, len) == (LONG)len;
-    Close(fh);
-    if (!ok)
-        DeleteFile((STRPTR)name);
-    return ok;
-}
-
-static int add_rom(void *ctx, const char *folder, const char *name,
-                   unsigned long size, unsigned long crc)
-{
-    return packs_add((PackIndex *)ctx, folder, name, size, crc) != 0;
-}
-
-static int parse_zip(Run *r, const unsigned char *zip, unsigned long len, char *date)
-{
-    int rc;
-    packs_free(&r->ix);
-    packs_init(&r->ix);
-    rc = dat_from_zip(zip, len, add_rom, &r->ix, date);
-    if (rc == 0 && r->ix.n < 100)
-        rc = -1;
-    if (rc == 0 && packs_finish(&r->ix))
-        rc = -2;
-    return rc;
-}
-
-/* Find the newest Games DAT on the server; fetch it unless the cached one
- * is it. The index page is 7 KB; the zip is only fetched when it changed. */
-static int get_dat(Run *r, int offline)
-{
-    unsigned long len = 0, clen = 0;
-    unsigned char *zip = NULL, *cname;
-    char want[160], path[400], date[16];
-    int rc;
-
-    /* want = the zip's real name, "Commodore Amiga - WHDLoad - Games (2026-10-28).zip" */
-    want[0] = 0;
-    cname = load_file(CACHE_NAME, &clen, 200);
-    if (!offline && SocketBase) {
-        unsigned long ilen;
-        unsigned char *index;
-        const char *p, *q;
-        url_encode(PACKDIR, path, sizeof(path));
-        index = r->ftp_only ? NULL : http_get(HOST, path, &ilen, 256 * 1024);
-        if (index) {
-            /* href="Commodore%20Amiga%20-%20WHDLoad%20-%20Games%20(2026-10-28).zip" */
-            char enc[120], name[160];
-            url_encode(SETNAME, enc, sizeof(enc));
-            p = strstr((char *)index, enc);
-            if (p && (q = strstr(p, ".zip\"")) != NULL && q - p < 150) {
-                memcpy(name, p, q + 4 - p);
-                name[q + 4 - p] = 0;
-                url_decode(name, want, sizeof(want));
-            }
-            free(index);
-        }
-        if (!want[0]) {
-            if (!r->ftp_only)
-                printf("Trying FTP instead...\n");
-            index = ftp_list(HOST, FTPDIR, &ilen, 256 * 1024);
-            /* one name per line: "Commodore Amiga - WHDLoad - Games (2026-10-28).zip" */
-            if (index && (p = strstr((char *)index, SETNAME)) != NULL &&
-                (q = strstr(p, ".zip")) != NULL && q - p < 150) {
-                memcpy(want, p, q + 4 - p);
-                want[q + 4 - p] = 0;
-            }
-            free(index);
-        }
-        if (!want[0])
-            printf("Could not read the pack list on %s; using the saved one.\n", HOST);
-    }
-    if (want[0] && !(cname && !strcmp((char *)cname, want))) {
-        char enc[200];
-        url_encode(PACKDIR, path, sizeof(path));
-        url_encode(want, enc, sizeof(enc));
-        strncat(path, enc, sizeof(path) - strlen(path) - 1);
-        printf("Fetching the new pack list...\n");
-        zip = r->ftp_only ? NULL : http_get(HOST, path, &len, MAXZIP);
-        if (!zip) {
-            snprintf(path, sizeof(path), "%s%s", FTPDIR, want);
-            if (!r->ftp_only)
-                printf("Trying FTP instead...\n");
-            zip = ftp_get(HOST, path, &len, MAXZIP);
-        }
-        if (zip) {
-            rc = parse_zip(r, zip, len, date);
-            if (rc == 0) {
-                BPTR l = CreateDir((STRPTR)CACHEDIR);
-                if (l)
-                    UnLock(l);
-                if (!save_file(CACHE_ZIP, zip, len) || !save_file(CACHE_NAME, want, strlen(want)))
-                    printf("Note: could not save the pack list in %s\n", CACHEDIR);
-                free(zip);
-                free(cname);
-                printf("Pack list of %s: %d packs.\n", date, r->ix.n);
-                return 0;
-            }
-            printf("The downloaded pack list is damaged (%d); using the saved one.\n", rc);
-            free(zip);
-        }
-    }
-    free(cname);
-    zip = load_file(CACHE_ZIP, &len, MAXZIP);
-    if (!zip) {
-        printf("No pack list: none saved in %s and none downloaded.\n", CACHEDIR);
-        return -1;
-    }
-    rc = parse_zip(r, zip, len, date);
-    free(zip);
-    if (rc) {
-        printf("The saved pack list is damaged (%d).\n", rc);
-        return -1;
-    }
-    printf("Pack list of %s: %d packs.\n", date, r->ix.n);
-    return 0;
-}
-
-/* ---- the games ------------------------------------------------------ */
-
-static int read_slave(Run *r, const char *path, const char *slave, SlaveInfo *si)
-{
-    char full[600];
-    BPTR fh;
-    LONG n;
-    int l = (int)strlen(path);
-    if (l + (int)strlen(slave) + 2 > (int)sizeof(full))
-        return 0;
-    strcpy(full, path);
-    if (l && path[l - 1] != ':' && path[l - 1] != '/')
-        strcat(full, "/");
-    strcat(full, slave);
-    fh = Open((STRPTR)full, MODE_OLDFILE);
-    if (!fh)
-        return 0;
-    n = Read(fh, r->slavebuf, SLAVEMAX);
-    Close(fh);
-    return n > 0 && slave_parse(r->slavebuf, n, si);
-}
-
-static int on_game(void *ctx, const char *path, const char *name, const char *slave)
-{
-    Run *r = (Run *)ctx;
-    SlaveInfo si;
-    Match m;
+    Out *o = (Out *)ctx;
     char line[700];
-
-    if (r->pattern && !MatchPatternNoCase((STRPTR)r->pattern, (STRPTR)name))
-        return break_pressed();
-    if (!read_slave(r, path, slave, &si))
-        memset(&si, 0, sizeof(si));
-    match_game(&r->ix, name, slave, &si, &m);
-    r->games++;
-    r->st[m.status]++;
-    if (r->collect && m.status == M_UPDATE) {
-        Todo *t = (Todo *)malloc(sizeof(Todo) + strlen(path));
-        if (t) {
-            t->next = NULL;
-            t->pack = m.newest;
-            strcpy(t->installed, m.installed);
-            strcpy(t->path, path);
-            *r->tail = t;
-            r->tail = &t->next;
-        }
-    }
-
-    if (r->showall || m.status == M_UPDATE || m.status == M_CHECK) {
-        const char *iv = m.installed[0] ? m.installed : "?";
-        switch (m.status) {
-        case M_UPDATE:
-        case M_CHECK:
-        case M_NEWER:
-        case M_CURRENT:
-            snprintf(line, sizeof(line), "%-8s %s  %s -> %s  (%s)\n", status_word(m.status), path,
-                     iv, m.newest->ver, m.newest->file);
-            break;
-        case M_UNKNOWN:
-            snprintf(line, sizeof(line), "%-8s %s  newest pack %s\n", status_word(m.status), path,
-                     m.newest->file);
-            break;
-        default:
-            snprintf(line, sizeof(line), "%-8s %s\n", status_word(m.status), path);
-        }
+    if (o->showall || g->status == M_UPDATE || g->status == M_CHECK) {
+        const char *iv = g->installed[0] ? g->installed : "?";
+        if (g->pack && g->status != M_UNKNOWN)
+            snprintf(line, sizeof(line), "%-8s %s  %s -> %s  (%s)\n", status_word(g->status), g->path,
+                     iv, g->pack->ver, g->pack->file);
+        else if (g->pack)
+            snprintf(line, sizeof(line), "%-8s %s  newest pack %s\n", status_word(g->status), g->path,
+                     g->pack->file);
+        else
+            snprintf(line, sizeof(line), "%-8s %s\n", status_word(g->status), g->path);
         fputs(line, stdout);
         fflush(stdout);
-        r->printed++;
     }
-    if (r->report) {
-        snprintf(line, sizeof(line), "%s\t%s\t%s\t%s\t%s\t%s\n", status_word(m.status), path,
-                 m.installed, m.newest ? m.newest->ver : "", m.newest ? m.newest->file : "",
-                 m.newest ? m.newest->folder : "");
-        FPuts(r->report, (STRPTR)line);
+    if (o->report) {
+        snprintf(line, sizeof(line), "%s\t%s\t%s\t%s\t%s\t%s\n", status_word(g->status), g->path,
+                 g->installed, g->pack ? g->pack->ver : "", g->pack ? g->pack->file : "",
+                 g->pack ? g->pack->folder : "");
+        FPuts(o->report, (STRPTR)line);
     }
-    return break_pressed();
 }
 
-/* y / n / a(ll) / q(uit); no input (not a console) counts as n */
+/* y / n / a(ll) / q(uit); no input (not a console) counts as q */
 static int ask(const char *question)
 {
     char buf[16];
@@ -328,39 +137,30 @@ static int ask(const char *question)
     }
 }
 
-static int do_updates(Run *r, int yes)
+static int cli_updates(Engine *e, int yes)
 {
-    UpdateConf c;
-    Todo *t;
-    int done = 0, failed = 0, n = 0, total = 0, first = 1;
+    BPTR log;
+    long i;
+    int done = 0, failed = 0, n = 0, total = 0, first = 1, stop = 0;
     char q[700];
 
-    for (t = r->todo; t; t = t->next)
-        total++;
+    for (i = 0; i < e->n; i++)
+        total += e->games[i]->status == M_UPDATE;
     if (!total) {
         printf("Nothing to update.\n");
         return 0;
     }
-    if (!SocketBase) {
-        printf("Updating needs the network (no bsdsocket.library).\n");
-        return -1;
-    }
-    memset(&c, 0, sizeof(c));
-    c.host = HOST;
-    c.webdir = PACKDIR;
-    c.ftpdir = FTPDIR;
-    c.setdir = SETDIR;
-    c.ftp_only = r->ftp_only;
-    c.log = Open((STRPTR)LOGFILE, MODE_READWRITE);
-    if (c.log)
-        Seek(c.log, 0, OFFSET_END);
+    log = engine_open_log();
     printf("\n%d game(s) to update. The old copies go to WHDUpdate-Old on the same volume.\n", total);
-    for (t = r->todo; t; t = t->next) {
-        int a = 'y';
+    for (i = 0; i < e->n && !stop; i++) {
+        Game *g = e->games[i];
+        if (g->status != M_UPDATE)
+            continue;
         n++;
         if (!yes) {
-            snprintf(q, sizeof(q), "(%d/%d) %s %s -> %s (%lu KB)?", n, total, t->path,
-                     t->installed, t->pack->ver, (t->pack->size + 1023) / 1024);
+            int a;
+            snprintf(q, sizeof(q), "(%d/%d) %s %s -> %s (%lu KB)?", n, total, g->path,
+                     g->installed, g->pack->ver, (g->pack->size + 1023) / 1024);
             a = ask(q);
             if (a == 'q')
                 break;
@@ -369,137 +169,177 @@ static int do_updates(Run *r, int yes)
             if (a == 'a')
                 yes = 1;
         } else {
-            printf("(%d/%d) %s %s -> %s\n", n, total, t->path, t->installed, t->pack->ver);
+            printf("(%d/%d) %s %s -> %s\n", n, total, g->path, g->installed, g->pack->ver);
         }
         if (!first)
             Delay(100);                   /* two seconds between downloads: go easy on the server */
         first = 0;
-        switch (update_game(&c, t->path, t->pack, t->installed)) {
+        switch (engine_update(e, g, log)) {
         case 0: done++; break;
-        case -2: printf("*** Stopped.\n"); t = NULL; break;
+        case -2: printf("*** Stopped.\n"); stop = 1; break;
         default: failed++;
         }
-        if (!t)
-            break;
     }
-    if (c.log)
-        Close(c.log);
+    if (log)
+        Close(log);
     printf("\n%d updated, %d failed. Log: %s\n", done, failed, LOGFILE);
     return failed ? -1 : 0;
 }
 
-int main(void)
+static int cli(Engine *e, LONG *args)
 {
-    LONG args[A_COUNT] = {0};
-    struct RDArgs *rda;
-    Run run;
+    Out out;
     int rc = RETURN_OK, depth = 3, stopped = 0;
 
-    memset(&run, 0, sizeof(run));
-    packs_init(&run.ix);
-    rda = ReadArgs((STRPTR)TEMPLATE, args, NULL);
-    if (!rda) {
-        PrintFault(IoErr(), (STRPTR)"WHDUpdate");
-        return RETURN_ERROR;
-    }
-    if (!args[A_DIR] && !args[A_ALL]) {
-        printf("WHDUpdate " WHDU_VERSION " - checks your WHDLoad games against Retroplay's packs.\n"
-               "Name the drawers your games are in, or ALL for every volume:\n"
-               "  WHDUpdate Games:  [UPDATE [YES]] [GAME=pattern] [SHOWALL] [REPORT=file]\n"
-               "                    [OFFLINE] [FTP] [DEPTH=n]\n");
-        FreeArgs(rda);
-        return RETURN_WARN;
-    }
+    memset(&out, 0, sizeof(out));
     if (args[A_DEPTH])
         depth = (int)*(LONG *)args[A_DEPTH];
-    run.showall = args[A_SHOWALL] != 0;
-    run.ftp_only = args[A_FTP] != 0;
-    run.collect = args[A_UPDATE] != 0;
-    run.tail = &run.todo;
-    if (args[A_GAME]) {
-        LONG plen = (LONG)strlen((char *)args[A_GAME]) * 2 + 2;
-        run.pattern = (char *)malloc(plen);
-        if (!run.pattern || ParsePatternNoCase((STRPTR)args[A_GAME], (STRPTR)run.pattern, plen) < 0) {
-            printf("GAME=%s is not a pattern I can use\n", (char *)args[A_GAME]);
-            FreeArgs(rda);
-            return RETURN_ERROR;
-        }
-    }
-    if (run.collect)
-        IconBase = OpenLibrary((STRPTR)"icon.library", 37);
-    run.slavebuf = (unsigned char *)malloc(SLAVEMAX);
-    if (!args[A_OFFLINE]) {
-        SocketBase = OpenLibrary((STRPTR)"bsdsocket.library", 4);
-        if (!SocketBase)
-            printf("No TCP/IP stack running; using the saved pack list.\n");
-    }
-    if (!run.slavebuf || get_dat(&run, args[A_OFFLINE] != 0)) {
-        rc = RETURN_FAIL;
-        goto done;
-    }
+    out.showall = args[A_SHOWALL] != 0;
+    e->seen = cli_seen;
+    e->seen_ctx = &out;
+    if (engine_dat(e, args[A_OFFLINE] != 0))
+        return RETURN_FAIL;
     if (args[A_REPORT]) {
-        run.report = Open((STRPTR)args[A_REPORT], MODE_NEWFILE);
-        if (!run.report)
+        out.report = Open((STRPTR)args[A_REPORT], MODE_NEWFILE);
+        if (!out.report)
             printf("Cannot write %s\n", (char *)args[A_REPORT]);
         else
-            FPuts(run.report, (STRPTR)"status\tdrawer\tinstalled\tnewest\tpack\tfolder\n");
+            FPuts(out.report, (STRPTR)"status\tdrawer\tinstalled\tnewest\tpack\tfolder\n");
     }
-
     if (args[A_ALL]) {
-        char *vols = volume_list(), *v, *w;
-        for (v = vols; v && *v && !stopped; v += strlen(v) + 1) {
-            for (w = vols; w < v && strcmp(w, v); w += strlen(w) + 1)
-                ;
-            if (w < v)
-                continue;                     /* the same name twice */
-            printf("Looking through %s\n", v);
-            if (scan_tree(v, depth, on_game, &run) == -2)
-                stopped = 1;
-        }
-        free(vols);
+        stopped = engine_scan(e, "ALL", depth) == -2;
     } else {
         STRPTR *d;
         for (d = (STRPTR *)args[A_DIR]; *d && !stopped; d++) {
-            int s = scan_tree((char *)*d, depth, on_game, &run);
+            int s = engine_scan(e, (char *)*d, depth);
             if (s == -1)
                 printf("Cannot find %s\n", (char *)*d);
             else if (s == -2)
                 stopped = 1;
         }
     }
-
+    if (out.report)
+        Close(out.report);
     if (stopped)
         printf("*** Stopped.\n");
     printf("\n%ld games: %ld up to date, %ld with an update, %ld to check by hand,\n"
            "%ld without a version in the slave, %ld not in the pack list, %ld newer than the pack.\n",
-           run.games, run.st[M_CURRENT], run.st[M_UPDATE], run.st[M_CHECK],
-           run.st[M_UNKNOWN], run.st[M_NOMATCH], run.st[M_NEWER]);
-    if (run.st[M_CHECK])
+           e->n, e->st[M_CURRENT], e->st[M_UPDATE], e->st[M_CHECK],
+           e->st[M_UNKNOWN], e->st[M_NOMATCH], e->st[M_NEWER]);
+    if (e->st[M_CHECK])
         printf("\"check\": the two versions can be read either way (1.51 vs 1.6).\n");
-    if (run.st[M_UPDATE])
+    if (e->st[M_UPDATE])
         rc = RETURN_WARN;
-    if (run.collect && !stopped) {
-        if (do_updates(&run, args[A_YES] != 0) == 0)
-            rc = RETURN_OK;
-        else
-            rc = RETURN_WARN;
+    if (args[A_UPDATE] && !stopped)
+        rc = cli_updates(e, args[A_YES] != 0) == 0 ? RETURN_OK : RETURN_WARN;
+    return rc;
+}
+
+/* Started from Workbench, or by Run, a program gets the default 4 KB stack:
+ * too little for the window plus the pack list decoder (it overran it and
+ * hung on a 3.1 A1200). So it runs on its own 32 KB, through StackSwap() -
+ * as PrismRTG's update tool does; across the swap only globals are used. */
+#define NEED_STACK 32768UL
+static struct StackSwapStruct swap;
+static APTR swapMem;
+static int swapRc, g_argc;
+static char **g_argv;
+
+static int whdu_main(int argc, char **argv);
+
+int main(int argc, char **argv)
+{
+    struct Task *me = FindTask(NULL);
+    if ((ULONG)me->tc_SPUpper - (ULONG)me->tc_SPLower >= NEED_STACK - 4096)
+        return whdu_main(argc, argv);
+    if (!(swapMem = AllocVec(NEED_STACK, MEMF_ANY))) {
+        printf("WHDUpdate: not enough memory for its stack\n");
+        return RETURN_FAIL;
+    }
+    g_argc = argc;
+    g_argv = argv;
+    swap.stk_Lower = swapMem;
+    swap.stk_Upper = (ULONG)swapMem + NEED_STACK;
+    swap.stk_Pointer = (APTR)swap.stk_Upper;
+    StackSwap(&swap);
+    swapRc = whdu_main(g_argc, g_argv);
+    StackSwap(&swap);
+    FreeVec(swapMem);
+    return swapRc;
+}
+
+static int whdu_main(int argc, char **argv)
+{
+    LONG args[A_COUNT] = {0};
+    struct RDArgs *rda = NULL;
+    Engine e;
+    int rc;
+
+    (void)argv;
+    if (engine_init(&e)) {
+        printf("WHDUpdate: out of memory\n");
+        return RETURN_FAIL;
+    }
+    if (argc) {                           /* from a Shell */
+        rda = ReadArgs((STRPTR)TEMPLATE, args, NULL);
+        if (!rda) {
+            PrintFault(IoErr(), (STRPTR)"WHDUpdate");
+            engine_free(&e);
+            return RETURN_ERROR;
+        }
+        if (!args[A_DIR] && !args[A_ALL] && !args[A_GUI]) {
+            printf("WHDUpdate " WHDU_VERSION " - keeps your WHDLoad games up to date.\n"
+                   "Name the drawers your games are in, or ALL for every volume:\n"
+                   "  WHDUpdate Games:  [UPDATE [YES]] [GAME=pattern] [SHOWALL] [REPORT=file]\n"
+                   "                    [OFFLINE] [FTP] [DEPTH=n]\n"
+                   "  WHDUpdate GUI     the window (also from the icon)\n");
+            FreeArgs(rda);
+            engine_free(&e);
+            return RETURN_WARN;
+        }
+        if (args[A_GAME]) {
+            LONG plen = (LONG)strlen((char *)args[A_GAME]) * 2 + 2;
+            e.pattern = (char *)malloc(plen);
+            if (!e.pattern || ParsePatternNoCase((STRPTR)args[A_GAME], (STRPTR)e.pattern, plen) < 0) {
+                printf("GAME=%s is not a pattern I can use\n", (char *)args[A_GAME]);
+                FreeArgs(rda);
+                engine_free(&e);
+                return RETURN_ERROR;
+            }
+        }
+        e.ftp_only = args[A_FTP] != 0;
+    }
+    IconBase = OpenLibrary((STRPTR)"icon.library", 37);
+    if (!args[A_OFFLINE]) {
+        SocketBase = OpenLibrary((STRPTR)"bsdsocket.library", 4);
+        if (!SocketBase && argc && !args[A_GUI])
+            printf("No TCP/IP stack running; using the saved pack list.\n");
     }
 
-done:
-    if (run.report)
-        Close(run.report);
-    while (run.todo) {
-        Todo *t = run.todo->next;
-        free(run.todo);
-        run.todo = t;
+    if (!argc || args[A_GUI]) {
+        char dirs[400];
+        dirs[0] = 0;
+        if (args[A_DIR]) {
+            STRPTR *d;
+            for (d = (STRPTR *)args[A_DIR]; *d; d++) {
+                if (dirs[0])
+                    strncat(dirs, ";", sizeof(dirs) - strlen(dirs) - 1);
+                strncat(dirs, (char *)*d, sizeof(dirs) - strlen(dirs) - 1);
+            }
+        }
+        gui_on = 1;
+        rc = gui_main(&e, dirs[0] ? dirs : NULL);
+        gui_on = 0;
+    } else {
+        rc = cli(&e, args);
     }
-    free(run.pattern);
+
+    engine_free(&e);
     if (IconBase)
         CloseLibrary(IconBase);
-    packs_free(&run.ix);
-    free(run.slavebuf);
     if (SocketBase)
         CloseLibrary(SocketBase);
-    FreeArgs(rda);
+    if (rda)
+        FreeArgs(rda);
     return rc;
 }

@@ -17,6 +17,21 @@ WHDUpdate Games: GAME=Lotus#?        only the games whose drawer name fits the p
 DEPTH=n                              how many drawer levels to look down (3)
 ```
 
+## The window
+
+Double-click the icon (or `WHDUpdate GUI` in a Shell): type the drawers your games are
+in - several with `;` between them, or `ALL` - and press **Check**. Click a game to mark
+it (`*`), or **Mark all**, then **Update marked**. **Show** picks what the list shows:
+the updates, all games, the ones to check by hand, the ones not found, or the ones whose
+slave has no version. **Stop** ends a check or the updates between two steps. The drawers
+are remembered (`ENVARC:WHDUpdate.dirs`), and the next start checks right away.
+
+The window is laid out from the screen font and fits a 640x200 NTSC screen with Topaz 8;
+when the screen font is too big for the screen, it uses Topaz 8. The list always uses the
+fixed-width system font, so its columns line up.
+
+## How it works
+
 It reads Retroplay's list of WHDLoad packs (the DAT) from Turran's pack server
 (`ftp2.grandis.nu`, plain HTTP, falling back to FTP). The list is saved in
 `PROGDIR:Cache` and only downloaded again when the server has a newer one.

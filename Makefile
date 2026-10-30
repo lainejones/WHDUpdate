@@ -7,15 +7,15 @@
 #   make test     host checks of the platform-neutral code
 #   make clean
 
-VERSION = 0.2
+VERSION = 0.3
 CC      = m68k-amigaos-gcc
 CFLAGS  = -m68000 -O2 -noixemul -Wall -Wno-pointer-sign -fomit-frame-pointer \
           -DWHDU_VERSION=\"$(VERSION)\"
 
 CORE    = src/slave.c src/inflate.c src/dat.c src/match.c
-AMIGA   = src/main.c src/net.c src/scan.c src/update.c
+AMIGA   = src/main.c src/net.c src/scan.c src/update.c src/engine.c src/gui.c
 HDRS    = src/slave.h src/inflate.h src/dat.h src/match.h
-AHDRS   = src/amiga.h src/update.h
+AHDRS   = src/amiga.h src/update.h src/engine.h
 
 out/WHDUpdate: $(CORE) $(AMIGA) $(HDRS) $(AHDRS)
 	mkdir -p out

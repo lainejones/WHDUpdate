@@ -1,0 +1,680 @@
+/* gui.c - the WHDUpdate window (GadTools, Kickstart 2.04+).
+ *
+ * Laid out from the font: every row is the font's height plus a little, so
+ * on a plain PAL or NTSC screen with Topaz 8 the whole window needs about
+ * 140 lines - it fits a 640x200 screen. When the screen font is so big that
+ * even the smallest layout would not fit, the window uses Topaz 8 instead.
+ * The game list always uses a fixed-width font, so its columns line up
+ * when the screen font is proportional.
+ *
+ *   Drawers [Games1:Games;Games2:              ] [Check]
+ *   [2594 games: 1116 updates, 9 to check     ] Show <Updates>
+ *   +----------------------------------------------------+
+ *   |* update   Cabal                       1.2a > 1.3   |
+ *   |  update   CastleVania                 1.1 > 1.2    |
+ *   +----------------------------------------------------+
+ *   [Update marked] [Mark all] [Mark none] [Stop]
+ *   [status line                                        ]
+ *
+ * Long jobs (the check, the updates) run in this task; break_pressed() calls
+ * gui_poll() between steps, which keeps the window alive and sees Stop. */
+#include <exec/types.h>
+#include <exec/memory.h>
+#include <intuition/intuition.h>
+#include <intuition/gadgetclass.h>
+#include <libraries/gadtools.h>
+#include <graphics/text.h>
+#include <graphics/gfxbase.h>
+#include <proto/exec.h>
+#include <proto/dos.h>
+#include <proto/intuition.h>
+#include <proto/gadtools.h>
+#include <proto/graphics.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "match.h"
+#include "amiga.h"
+#include "engine.h"
+
+struct IntuitionBase *IntuitionBase = NULL;
+struct GfxBase *GfxBase = NULL;
+struct Library *GadToolsBase = NULL;
+
+#define DIRSVAR "WHDUpdate.dirs"
+#define M 6                       /* margin */
+#define GAP 4
+
+enum { G_DIRS, G_CHECK, G_SUMMARY, G_SHOW, G_LIST, G_UPDATE, G_MARKALL, G_MARKNONE, G_STOP,
+       G_STATUS, G_COUNT };
+
+static const char *show_labels[] = {"Updates", "All games", "To check", "Not found", "No version", NULL};
+
+static struct TextAttr topaz8 = {(STRPTR)"topaz.font", 8, FS_NORMAL, FPF_ROMFONT};
+
+static struct {
+    Engine *e;
+    struct Screen *scr;
+    APTR vi;
+    struct Window *win;
+    struct Gadget *glist, *g[G_COUNT];
+    struct TextAttr ta, lvta;     /* gadgets / list */
+    struct TextFont *font, *lvfont;
+    struct RastPort mrp;          /* for measuring text */
+    struct List list;
+    int filter, busy, stop, quit, cols;
+    char dirs[400], status[200], summary[120];
+} G;
+
+/* ---- small helpers ------------------------------------------------------ */
+
+static void new_list(struct List *l)      /* NewList() is in amiga.lib */
+{
+    l->lh_Head = (struct Node *)&l->lh_Tail;
+    l->lh_Tail = NULL;
+    l->lh_TailPred = (struct Node *)&l->lh_Head;
+}
+
+static int tlen(const char *s)
+{
+    return TextLength(&G.mrp, (STRPTR)s, strlen(s));
+}
+
+static int bh(void) { return G.font->tf_YSize + 6; }
+
+static void load_dirs(void)
+{
+    BPTR f = Open((STRPTR)"ENV:" DIRSVAR, MODE_OLDFILE);
+    LONG n;
+    if (!f)
+        f = Open((STRPTR)"ENVARC:" DIRSVAR, MODE_OLDFILE);
+    if (!f)
+        return;
+    n = Read(f, G.dirs, sizeof(G.dirs) - 1);
+    Close(f);
+    G.dirs[n > 0 ? n : 0] = 0;
+    while (n > 0 && (G.dirs[n - 1] == '\n' || G.dirs[n - 1] == ' '))
+        G.dirs[--n] = 0;
+}
+
+static void save_dirs(void)
+{
+    static const char *where[] = {"ENV:" DIRSVAR, "ENVARC:" DIRSVAR};
+    int i;
+    for (i = 0; i < 2; i++) {
+        BPTR f = Open((STRPTR)where[i], MODE_NEWFILE);
+        if (f) {
+            Write(f, G.dirs, strlen(G.dirs));
+            Close(f);
+        }
+    }
+}
+
+/* ---- the list ------------------------------------------------------------ */
+
+static int shown(const Game *g)
+{
+    switch (G.filter) {
+    case 0: return g->status == M_UPDATE;
+    case 2: return g->status == M_CHECK || g->status == M_NEWER;
+    case 3: return g->status == M_NOMATCH;
+    case 4: return g->status == M_UNKNOWN;
+    default: return 1;
+    }
+}
+
+static int markable(const Game *g)
+{
+    return g->pack && (g->status == M_UPDATE || g->status == M_CHECK);
+}
+
+static void make_label(Game *g)
+{
+    static const char *words[] = {"not found", "no version", "current", "update", "newer", "check"};
+    char vers[40];
+    int namew;
+    if (!g->pack)
+        vers[0] = 0;
+    else
+        snprintf(vers, sizeof(vers), "%s > %s", g->installed[0] ? g->installed : "?", g->pack->ver);
+    namew = G.cols - 2 - 11 - (int)strlen(vers) - 1;
+    if (namew < 8)
+        namew = 8;
+    snprintf(g->label, sizeof(g->label), "%c %-10s %-*.*s %s", g->marked ? '*' : ' ',
+             words[g->status], namew, namew, g->name, vers);
+    g->node.ln_Name = g->label;
+}
+
+static void detach_list(void)
+{
+    if (G.win && G.g[G_LIST])
+        GT_SetGadgetAttrs(G.g[G_LIST], G.win, NULL, GTLV_Labels, ~0UL, TAG_END);
+}
+
+static void attach_list(void)
+{
+    if (G.win && G.g[G_LIST])
+        GT_SetGadgetAttrs(G.g[G_LIST], G.win, NULL, GTLV_Labels, (ULONG)&G.list, TAG_END);
+}
+
+static void rebuild_list(void)
+{
+    long i;
+    detach_list();
+    new_list(&G.list);
+    for (i = 0; i < G.e->n; i++) {
+        Game *g = G.e->games[i];
+        if (shown(g)) {
+            make_label(g);
+            AddTail(&G.list, &g->node);
+        }
+    }
+    attach_list();
+}
+
+static Game *nth_shown(long n)
+{
+    struct Node *nd;
+    for (nd = G.list.lh_Head; nd->ln_Succ; nd = nd->ln_Succ)
+        if (!n--)
+            return (Game *)nd;    /* the Node is the Game's first member */
+    return NULL;
+}
+
+static void set_summary(void)
+{
+    Engine *e = G.e;
+    long marked = 0, i;
+    for (i = 0; i < e->n; i++)
+        marked += e->games[i]->marked;
+    if (!e->n)
+        snprintf(G.summary, sizeof(G.summary), "No games checked yet");
+    else
+        snprintf(G.summary, sizeof(G.summary), "%ld games: %ld updates, %ld to check, %ld marked",
+                 e->n, e->st[M_UPDATE], e->st[M_CHECK] + e->st[M_NEWER], marked);
+    if (G.win && G.g[G_SUMMARY])
+        GT_SetGadgetAttrs(G.g[G_SUMMARY], G.win, NULL, GTTX_Text, (ULONG)G.summary, TAG_END);
+}
+
+/* ---- gadgets ------------------------------------------------------------- */
+
+static int min_width(void)
+{
+    int b = tlen("Update marked") + 16;
+    return 2 * M + 4 * b + 3 * GAP;
+}
+
+static int min_height(void)
+{
+    /* four rows of gadgets + a list of at least four lines */
+    return 4 + 4 * bh() + 4 * GAP + 4 * G.lvfont->tf_YSize + 4 + 4;
+}
+
+static int make_gadgets(void)
+{
+    struct NewGadget ng;
+    struct Gadget *gad;
+    struct Window *w = G.win;
+    int left = w->BorderLeft + M, right = w->Width - w->BorderRight - M;
+    int top = w->BorderTop + 4, bottom = w->Height - w->BorderBottom - 4;
+    int h = bh(), lw, cw, y, bw, i, lvh;
+    static const char *btn[] = {"Update marked", "Mark all", "Mark none", "Stop"};
+
+    memset(G.g, 0, sizeof(G.g));
+    gad = CreateContext(&G.glist);
+    memset(&ng, 0, sizeof(ng));
+    ng.ng_VisualInfo = G.vi;
+    ng.ng_TextAttr = &G.ta;
+
+    /* Drawers [....] [Check] */
+    lw = tlen("Drawers") + 8;
+    cw = tlen("Check") + 24;
+    ng.ng_LeftEdge = left + lw;
+    ng.ng_TopEdge = top;
+    ng.ng_Width = right - left - lw - GAP - cw;
+    ng.ng_Height = h;
+    ng.ng_GadgetText = (UBYTE *)"Drawers";
+    ng.ng_GadgetID = G_DIRS;
+    ng.ng_Flags = PLACETEXT_LEFT;
+    G.g[G_DIRS] = gad = CreateGadget(STRING_KIND, gad, &ng, GTST_String, (ULONG)G.dirs,
+                                     GTST_MaxChars, sizeof(G.dirs) - 1, GA_Disabled, G.busy, TAG_END);
+    ng.ng_LeftEdge = right - cw;
+    ng.ng_Width = cw;
+    ng.ng_GadgetText = (UBYTE *)"Check";
+    ng.ng_GadgetID = G_CHECK;
+    ng.ng_Flags = PLACETEXT_IN;
+    G.g[G_CHECK] = gad = CreateGadget(BUTTON_KIND, gad, &ng, GA_Disabled, G.busy, TAG_END);
+
+    /* [summary] Show <cycle> */
+    y = top + h + GAP;
+    cw = tlen("No version") + 32;
+    lw = tlen("Show") + 8;
+    ng.ng_LeftEdge = left;
+    ng.ng_TopEdge = y;
+    ng.ng_Width = right - left - cw - lw - GAP;
+    ng.ng_GadgetText = NULL;
+    ng.ng_GadgetID = G_SUMMARY;
+    G.g[G_SUMMARY] = gad = CreateGadget(TEXT_KIND, gad, &ng, GTTX_Text, (ULONG)G.summary,
+                                        GTTX_CopyText, TRUE, GTTX_Border, TRUE, TAG_END);
+    ng.ng_LeftEdge = right - cw;
+    ng.ng_Width = cw;
+    ng.ng_GadgetText = (UBYTE *)"Show";
+    ng.ng_GadgetID = G_SHOW;
+    ng.ng_Flags = PLACETEXT_LEFT;
+    G.g[G_SHOW] = gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)show_labels,
+                                     GTCY_Active, G.filter, GA_Disabled, G.busy, TAG_END);
+
+    /* the list */
+    y += h + GAP;
+    lvh = bottom - 2 * h - 2 * GAP - y;
+    ng.ng_LeftEdge = left;
+    ng.ng_TopEdge = y;
+    ng.ng_Width = right - left;
+    ng.ng_Height = lvh;
+    ng.ng_GadgetText = NULL;
+    ng.ng_GadgetID = G_LIST;
+    ng.ng_TextAttr = &G.lvta;
+    G.cols = (ng.ng_Width - 24) / G.lvfont->tf_XSize;
+    if (G.cols > (int)sizeof(((Game *)0)->label) - 1)
+        G.cols = sizeof(((Game *)0)->label) - 1;
+    G.g[G_LIST] = gad = CreateGadget(LISTVIEW_KIND, gad, &ng, GTLV_Labels, (ULONG)&G.list, TAG_END);
+    ng.ng_TextAttr = &G.ta;
+
+    /* the buttons */
+    y = bottom - 2 * h - GAP;
+    bw = (right - left - 3 * GAP) / 4;
+    ng.ng_TopEdge = y;
+    ng.ng_Height = h;
+    ng.ng_Width = bw;
+    ng.ng_Flags = PLACETEXT_IN;
+    for (i = 0; i < 4; i++) {
+        ng.ng_LeftEdge = left + i * (bw + GAP);
+        ng.ng_GadgetText = (UBYTE *)btn[i];
+        ng.ng_GadgetID = G_UPDATE + i;
+        G.g[G_UPDATE + i] = gad = CreateGadget(BUTTON_KIND, gad, &ng, GA_Disabled,
+                                               i == 3 ? !G.busy : G.busy, TAG_END);
+    }
+
+    /* the status line */
+    ng.ng_LeftEdge = left;
+    ng.ng_TopEdge = bottom - h;
+    ng.ng_Width = right - left;
+    ng.ng_GadgetText = NULL;
+    ng.ng_GadgetID = G_STATUS;
+    G.g[G_STATUS] = gad = CreateGadget(TEXT_KIND, gad, &ng, GTTX_Text, (ULONG)G.status,
+                                       GTTX_CopyText, TRUE, GTTX_Border, TRUE, TAG_END);
+    return gad != NULL;
+}
+
+static void relayout(void)
+{
+    struct Window *w = G.win;
+    if (G.glist) {
+        if (G.g[G_DIRS])
+            strcpy(G.dirs, (char *)((struct StringInfo *)G.g[G_DIRS]->SpecialInfo)->Buffer);
+        detach_list();
+        RemoveGList(w, G.glist, -1);
+        FreeGadgets(G.glist);
+        G.glist = NULL;
+    }
+    SetAPen(w->RPort, 0);
+    RectFill(w->RPort, w->BorderLeft, w->BorderTop, w->Width - w->BorderRight - 1,
+             w->Height - w->BorderBottom - 1);
+    if (!make_gadgets())
+        return;
+    AddGList(w, G.glist, ~0, -1, NULL);
+    RefreshGList(G.glist, w, NULL, -1);
+    GT_RefreshWindow(w, NULL);
+    RefreshWindowFrame(w);
+    rebuild_list();
+}
+
+static void set_busy(int on)
+{
+    int i;
+    G.busy = on;
+    G.stop = 0;
+    for (i = 0; i < G_COUNT; i++) {
+        if (!G.g[i] || i == G_LIST || i == G_SUMMARY || i == G_STATUS)
+            continue;
+        GT_SetGadgetAttrs(G.g[i], G.win, NULL, GA_Disabled, i == G_STOP ? !on : on, TAG_END);
+    }
+    if (IntuitionBase->LibNode.lib_Version >= 39) {
+        if (on)
+            SetWindowPointer(G.win, WA_BusyPointer, TRUE, WA_PointerDelay, TRUE, TAG_END);
+        else
+            SetWindowPointer(G.win, TAG_END);
+    }
+}
+
+/* ---- called by the engine while it works -------------------------------- */
+
+void gui_status(const char *text)
+{
+    strncpy(G.status, text, sizeof(G.status) - 1);
+    G.status[sizeof(G.status) - 1] = 0;
+    if (G.win && G.g[G_STATUS])
+        GT_SetGadgetAttrs(G.g[G_STATUS], G.win, NULL, GTTX_Text, (ULONG)G.status, TAG_END);
+}
+
+int gui_poll(void)
+{
+    struct IntuiMessage *msg;
+    if (!G.win)
+        return 0;
+    while ((msg = GT_GetIMsg(G.win->UserPort)) != NULL) {
+        ULONG cl = msg->Class;
+        struct Gadget *gad = (struct Gadget *)msg->IAddress;
+        GT_ReplyIMsg(msg);
+        switch (cl) {
+        case IDCMP_GADGETUP:
+            if (gad->GadgetID == G_STOP)
+                G.stop = 1;
+            break;
+        case IDCMP_CLOSEWINDOW:
+            G.stop = G.quit = 1;
+            break;
+        case IDCMP_NEWSIZE:
+            relayout();
+            break;
+        case IDCMP_REFRESHWINDOW:
+            GT_BeginRefresh(G.win);
+            GT_EndRefresh(G.win, TRUE);
+            break;
+        }
+    }
+    return G.stop;
+}
+
+/* ---- the jobs ---------------------------------------------------------- */
+
+static int cmp_games(const void *a, const void *b)
+{
+    const unsigned char *x = (const unsigned char *)(*(Game *const *)a)->name;
+    const unsigned char *y = (const unsigned char *)(*(Game *const *)b)->name;
+    for (;; x++, y++) {
+        int cx = *x >= 'A' && *x <= 'Z' ? *x | 32 : *x, cy = *y >= 'A' && *y <= 'Z' ? *y | 32 : *y;
+        if (cx != cy || !cx)
+            return cx - cy;
+    }
+}
+
+static void do_check(void)
+{
+    Engine *e = G.e;
+    char *d, *next, dirs[400];
+    int stopped = 0;
+
+    strcpy(G.dirs, (char *)((struct StringInfo *)G.g[G_DIRS]->SpecialInfo)->Buffer);
+    if (!G.dirs[0]) {
+        gui_status("Type the drawers your games are in (Games: or Games:;Games2:), then Check");
+        return;
+    }
+    save_dirs();
+    set_busy(1);
+    detach_list();
+    new_list(&G.list);
+    engine_clear(e);
+    attach_list();
+    set_summary();
+    if (engine_dat(e, 0) == 0) {
+        strcpy(dirs, G.dirs);
+        for (d = dirs; d && *d && !stopped; d = next) {
+            next = strchr(d, ';');
+            if (next)
+                *next++ = 0;
+            while (*d == ' ')
+                d++;
+            if (!*d)
+                continue;
+            switch (engine_scan(e, d, 3)) {
+            case -1: say("Cannot find %s", d); Delay(100); break;
+            case -2: stopped = 1; break;
+            }
+        }
+        qsort(e->games, e->n, sizeof(Game *), cmp_games);
+        if (stopped)
+            say("Stopped: %ld games looked at", e->n);
+        else if (e->st[M_UPDATE])
+            say("Click the games to update (* = marked), then Update marked");
+        else
+            say("Everything is up to date (pack list of %s)", e->datdate);
+    }
+    set_busy(0);
+    rebuild_list();
+    set_summary();
+}
+
+static void do_update(void)
+{
+    Engine *e = G.e;
+    struct EasyStruct es;
+    char body[200];
+    long i, n = 0, k = 0, done = 0, failed = 0;
+    BPTR log;
+
+    for (i = 0; i < e->n; i++)
+        n += e->games[i]->marked;
+    if (!n) {
+        gui_status("Mark the games to update first: click them in the list");
+        return;
+    }
+    snprintf(body, sizeof(body), "Update %ld game%s?\nThe old copies go to WHDUpdate-Old\n"
+             "on the same volume.", n, n == 1 ? "" : "s");
+    memset(&es, 0, sizeof(es));
+    es.es_StructSize = sizeof(es);
+    es.es_Title = (UBYTE *)"WHDUpdate";
+    es.es_TextFormat = (UBYTE *)body;
+    es.es_GadgetFormat = (UBYTE *)"Update|Cancel";
+    if (!EasyRequestArgs(G.win, &es, NULL, NULL))
+        return;
+    set_busy(1);
+    log = engine_open_log();
+    for (i = 0; i < e->n && !G.stop; i++) {
+        Game *g = e->games[i];
+        if (!g->marked)
+            continue;
+        if (k++)
+            Delay(100);               /* go easy on the server */
+        say("(%ld/%ld) %s %s > %s", k, n, g->name, g->installed, g->pack->ver);
+        switch (engine_update(e, g, log)) {
+        case 0: done++; break;
+        case -2: break;
+        default: failed++; g->marked = 0;
+        }
+        rebuild_list();
+        set_summary();
+    }
+    if (log)
+        Close(log);
+    set_busy(0);
+    rebuild_list();
+    set_summary();
+    say("%ld updated%s%ld failed. Old copies: WHDUpdate-Old; log: %s", done,
+        G.stop ? " (stopped), " : ", ", failed, LOGFILE);
+}
+
+static void mark_all(int on)
+{
+    long i;
+    for (i = 0; i < G.e->n; i++)
+        G.e->games[i]->marked = on && G.e->games[i]->status == M_UPDATE;
+    rebuild_list();
+    set_summary();
+}
+
+/* ---- the window ---------------------------------------------------------- */
+
+static int choose_fonts(void)
+{
+    struct TextAttr *sa = G.scr->Font;
+    struct TextFont *def = GfxBase->DefaultFont;
+    int need_w, need_h, bt, bb;
+
+    G.ta = *sa;
+    G.font = OpenFont(&G.ta);
+    if (!G.font) {
+        G.ta = topaz8;
+        G.font = OpenFont(&G.ta);
+    }
+    /* the list: the system's fixed-width default font */
+    G.lvta.ta_Name = (STRPTR)def->tf_Message.mn_Node.ln_Name;
+    G.lvta.ta_YSize = def->tf_YSize;
+    G.lvta.ta_Style = def->tf_Style;
+    G.lvta.ta_Flags = def->tf_Flags;
+    G.lvfont = OpenFont(&G.lvta);
+    if (!G.font || !G.lvfont)
+        return 0;
+    InitRastPort(&G.mrp);
+    SetFont(&G.mrp, G.font);
+
+    /* would the smallest layout fit the screen? if not, Topaz 8 for all */
+    bt = G.scr->WBorTop + G.scr->Font->ta_YSize + 1;
+    bb = 11;
+    need_w = min_width() + G.scr->WBorLeft + G.scr->WBorRight + 18;
+    need_h = min_height() + bt + bb;
+    if (need_w > G.scr->Width || need_h > G.scr->Height - G.scr->BarHeight - 1) {
+        CloseFont(G.font);
+        CloseFont(G.lvfont);
+        G.ta = G.lvta = topaz8;
+        G.font = OpenFont(&G.ta);
+        G.lvfont = OpenFont(&G.lvta);
+        if (!G.font || !G.lvfont)
+            return 0;
+        SetFont(&G.mrp, G.font);
+    }
+    return 1;
+}
+
+int gui_main(struct Engine *e, const char *dirs)
+{
+    int width, height, minw, minh, maxh;
+    char title[40];
+
+    memset(&G, 0, sizeof(G));
+    G.e = e;
+    new_list(&G.list);
+    IntuitionBase = (struct IntuitionBase *)OpenLibrary((STRPTR)"intuition.library", 37);
+    GfxBase = (struct GfxBase *)OpenLibrary((STRPTR)"graphics.library", 37);
+    GadToolsBase = OpenLibrary((STRPTR)"gadtools.library", 37);
+    if (!IntuitionBase || !GfxBase || !GadToolsBase)
+        goto done;
+    if (dirs)
+        strncpy(G.dirs, dirs, sizeof(G.dirs) - 1);
+    else
+        load_dirs();
+    if (!(G.scr = LockPubScreen(NULL)) || !(G.vi = GetVisualInfo(G.scr, TAG_END)) || !choose_fonts())
+        goto done;
+
+    minw = min_width() + G.scr->WBorLeft + G.scr->WBorRight + 18;
+    minh = min_height() + G.scr->WBorTop + G.scr->Font->ta_YSize + 1 + 11;
+    maxh = G.scr->Height - G.scr->BarHeight - 1;
+    width = 2 * M + 72 * G.lvfont->tf_XSize + 24 + G.scr->WBorLeft + G.scr->WBorRight + 18;
+    if (width > G.scr->Width)
+        width = G.scr->Width;
+    if (width < minw)
+        width = minw;
+    height = minh + 14 * G.lvfont->tf_YSize;      /* room for ~18 games */
+    if (height > maxh)
+        height = maxh;
+    if (minh > maxh)
+        minh = maxh;
+    snprintf(title, sizeof(title), "WHDUpdate " WHDU_VERSION);
+    G.win = OpenWindowTags(NULL,
+        WA_Left, (G.scr->Width - width) / 2, WA_Top, G.scr->BarHeight + 1,
+        WA_Width, width, WA_Height, height,
+        WA_MinWidth, minw, WA_MinHeight, minh, WA_MaxWidth, ~0UL, WA_MaxHeight, ~0UL,
+        WA_Title, (ULONG)title, WA_PubScreen, (ULONG)G.scr,
+        WA_DragBar, TRUE, WA_DepthGadget, TRUE, WA_CloseGadget, TRUE, WA_SizeGadget, TRUE,
+        WA_SizeBBottom, TRUE, WA_Activate, TRUE, WA_SimpleRefresh, TRUE, WA_NewLookMenus, TRUE,
+        WA_IDCMP, BUTTONIDCMP | LISTVIEWIDCMP | STRINGIDCMP | CYCLEIDCMP | IDCMP_CLOSEWINDOW |
+                  IDCMP_NEWSIZE | IDCMP_REFRESHWINDOW,
+        TAG_END);
+    if (!G.win)
+        goto done;
+    set_summary();
+    gui_status(G.dirs[0] ? "Checking..." :
+               "Type the drawers your games are in (Games: or Games:;Games2:), then Check");
+    relayout();
+    if (G.dirs[0])
+        do_check();                   /* the drawers are known: check right away */
+
+    while (!G.quit) {
+        struct IntuiMessage *msg;
+        Wait(1UL << G.win->UserPort->mp_SigBit);
+        while (!G.quit && (msg = GT_GetIMsg(G.win->UserPort)) != NULL) {
+            ULONG cl = msg->Class;
+            UWORD code = msg->Code;
+            struct Gadget *gad = (struct Gadget *)msg->IAddress;
+            GT_ReplyIMsg(msg);
+            switch (cl) {
+            case IDCMP_CLOSEWINDOW:
+                G.quit = 1;
+                break;
+            case IDCMP_NEWSIZE:
+                relayout();
+                break;
+            case IDCMP_REFRESHWINDOW:
+                GT_BeginRefresh(G.win);
+                GT_EndRefresh(G.win, TRUE);
+                break;
+            case IDCMP_GADGETUP:
+                switch (gad->GadgetID) {
+                case G_DIRS:              /* Return in the string: check */
+                case G_CHECK:
+                    do_check();
+                    break;
+                case G_SHOW:
+                    G.filter = code;
+                    rebuild_list();
+                    break;
+                case G_LIST: {
+                    Game *g = nth_shown(code);
+                    if (g && markable(g)) {
+                        g->marked = !g->marked;
+                        rebuild_list();
+                        set_summary();
+                    } else if (g) {
+                        gui_status(g->status == M_CURRENT ? "That one is up to date" :
+                                   "No pack to update that one from");
+                    }
+                    break;
+                }
+                case G_UPDATE:
+                    do_update();
+                    break;
+                case G_MARKALL:
+                    mark_all(1);
+                    break;
+                case G_MARKNONE:
+                    mark_all(0);
+                    break;
+                }
+                break;
+            }
+        }
+    }
+
+done:
+    if (G.win) {
+        detach_list();
+        CloseWindow(G.win);
+    }
+    if (G.glist)
+        FreeGadgets(G.glist);
+    if (G.font)
+        CloseFont(G.font);
+    if (G.lvfont)
+        CloseFont(G.lvfont);
+    if (G.vi)
+        FreeVisualInfo(G.vi);
+    if (G.scr)
+        UnlockPubScreen(NULL, G.scr);
+    if (GadToolsBase)
+        CloseLibrary(GadToolsBase);
+    if (GfxBase)
+        CloseLibrary((struct Library *)GfxBase);
+    if (IntuitionBase)
+        CloseLibrary((struct Library *)IntuitionBase);
+    return RETURN_OK;
+}

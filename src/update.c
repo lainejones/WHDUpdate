@@ -32,8 +32,6 @@
 #define P 600                    /* path buffers */
 #define OLDDIR "WHDUpdate-Old"
 
-struct Library *IconBase = NULL;
-
 static void cat_path(char *out, const char *dir, const char *name)
 {
     int l = (int)strlen(dir);
@@ -283,12 +281,12 @@ static int carry_saves(const char *olddir, const char *newdir, const char *rel)
                     strcpy(parent, n);
                     *(char *)leaf_of(parent) = 0;
                     if (exists(parent) && copy_file(o, n)) {
-                        printf("  kept %s\n", r);
+                        say("  kept %s", r);
                         count++;
                     }
                 } else if (!same_content(o, n) && copy_file(o, n)) {
                     /* the pack brings a fresh one (empty high scores): yours wins */
-                    printf("  kept your %s\n", r);
+                    say("  kept your %s", r);
                     count++;
                 }
             }
@@ -532,24 +530,24 @@ int update_game(const UpdateConf *c, const char *path, const Pack *p, const char
     cat_path(olddir, vol, OLDDIR);
     cat_path(work, olddir, ".work");
     if (!make_dir(olddir)) {
-        printf("  cannot make %s\n", olddir);
+        say("  cannot make %s", olddir);
         return -1;
     }
     delete_tree(work);
     if (!make_dir(work)) {
-        printf("  cannot make %s\n", work);
+        say("  cannot make %s", work);
         return -1;
     }
     /* room for the pack and its unpacked files, with some to spare */
     if (free_bytes(vol) < p->size * 4 + 512 * 1024) {
-        printf("  not enough free space on %s for %s\n", vol, p->file);
+        say("  not enough free space on %s for %s", vol, p->file);
         goto fail;
     }
 
     /* 1. download */
     cat_path(pack, work, p->file);
     if (!(fh = Open((STRPTR)pack, MODE_NEWFILE))) {
-        printf("  cannot write %s\n", pack);
+        say("  cannot write %s", pack);
         goto fail;
     }
     rc = -1;
@@ -570,7 +568,7 @@ int update_game(const UpdateConf *c, const char *path, const Pack *p, const char
         return -2;
     }
     if (rc || got != p->size || crc != p->crc) {
-        printf("  the download of %s failed or is damaged (%lu of %lu bytes)\n", p->file, got, p->size);
+        say("  the download of %s failed or is damaged (%lu of %lu bytes)", p->file, got, p->size);
         goto fail;
     }
 
@@ -586,7 +584,7 @@ int update_game(const UpdateConf *c, const char *path, const Pack *p, const char
         rc = run(cmd);
     }
     if (rc != 0 || !unpacked_drawer(unp, newname)) {
-        printf("  could not unpack %s%s\n", p->file,
+        say("  could not unpack %s%s", p->file,
                ends_nocase(p->file, ".lzx") ? " (needs C:UNLZX)" : " (needs C:LhA)");
         goto fail;
     }
@@ -608,13 +606,13 @@ int update_game(const UpdateConf *c, const char *path, const Pack *p, const char
     snprintf(oldinfo, sizeof(oldinfo), "%s.info", path);
     snprintf(backinfo, sizeof(backinfo), "%s.info", backup);
     if (!Rename((STRPTR)path, (STRPTR)backup)) {
-        printf("  cannot move the old %s aside (in use?)\n", path);
+        say("  cannot move the old %s aside (in use?)", path);
         goto fail;
     }
     if (exists(oldinfo))
         Rename((STRPTR)oldinfo, (STRPTR)backinfo);
     if (!Rename((STRPTR)newdir, (STRPTR)path)) {
-        printf("  cannot move the new drawer into place - the old one is back\n");
+        say("  cannot move the new drawer into place - the old one is back");
         Rename((STRPTR)backup, (STRPTR)path);
         if (exists(backinfo))
             Rename((STRPTR)backinfo, (STRPTR)oldinfo);
@@ -635,7 +633,7 @@ int update_game(const UpdateConf *c, const char *path, const Pack *p, const char
     delete_tree(work);
 
     slave_version(path, ver, sizeof(ver));
-    printf("  updated to %s%s; the old one is in %s\n", ver[0] ? ver : p->ver,
+    say("  updated to %s%s; the old one is in %s", ver[0] ? ver : p->ver,
            kept ? ", saves kept" : "", backup);
     snprintf(msg, sizeof(msg), "updated %s %s -> %s (%s), %d save(s) kept, old copy %s",
              path, installed[0] ? installed : "?", ver[0] ? ver : p->ver, p->file, kept, backup);

@@ -46,9 +46,16 @@ int scan_tree(const char *root, int depth, game_fn fn, void *ctx);
 char *volume_list(void);
 
 /* main.c -------------------------------------------------------------- */
-int break_pressed(void);
+extern struct Library *SocketBase, *IconBase;
+int break_pressed(void);                 /* Ctrl-C, or Stop in the window */
+void say(const char *fmt, ...);          /* a message: printed, or the status line */
+void busy(const char *fmt, ...);         /* progress: only on the status line */
 
-/* update.c ------------------------------------------------------------ */
-extern struct Library *IconBase;
+/* gui.c --------------------------------------------------------------- */
+struct Engine;
+int  gui_main(struct Engine *e, const char *dirs);
+void gui_status(const char *text);
+int  gui_poll(void);                     /* handle the window; 1 = Stop was pressed */
+
 
 #endif
