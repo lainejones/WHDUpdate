@@ -17,6 +17,13 @@ unsigned char *ftp_get(const char *host, const char *path,
 unsigned char *ftp_list(const char *host, const char *dir,
                         unsigned long *len, unsigned long maxlen);
 
+/* Download into the open file fh (expect = the size the DAT gives, for the
+ * progress line). 0 = done; *got = bytes, *crc = their CRC-32. */
+int http_download(const char *host, const char *path, BPTR fh,
+                  unsigned long expect, unsigned long *got, unsigned long *crc);
+int ftp_download(const char *host, const char *path, BPTR fh,
+                 unsigned long expect, unsigned long *got, unsigned long *crc);
+
 /* Percent-encode a path ("Retroplay WHDLoad Packs/A&B" -> "...%20...%26B"),
  * and back (also "&amp;" from HTML). */
 void url_encode(const char *in, char *out, int size);
@@ -40,5 +47,8 @@ char *volume_list(void);
 
 /* main.c -------------------------------------------------------------- */
 int break_pressed(void);
+
+/* update.c ------------------------------------------------------------ */
+extern struct Library *IconBase;
 
 #endif

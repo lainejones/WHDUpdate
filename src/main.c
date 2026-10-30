@@ -1,10 +1,10 @@
-/* main.c - WHDUpdate: are your WHDLoad games up to date?
+/* main.c - WHDUpdate: keeps your WHDLoad games up to date.
  *
- * This first version only checks. It reads Retroplay's list of WHDLoad
- * packs (the DAT, fetched from the pack server and kept in PROGDIR:Cache),
- * finds the game drawers in the drawers you name (or on every volume),
- * reads each game's slave for its version and says which games have a
- * newer pack. It changes nothing on your disks.
+ * It reads Retroplay's list of WHDLoad packs (the DAT, fetched from the pack
+ * server and kept in PROGDIR:Cache), finds the game drawers in the drawers
+ * you name (or on every volume), reads each game's slave for its version and
+ * says which games have a newer pack. Only with UPDATE does it change
+ * anything, and then only the games you say yes to (update.c).
  *
  *   WHDUpdate Games:            check the games under Games:
  *   WHDUpdate ALL               check every volume
@@ -13,6 +13,9 @@
  *   WHDUpdate Games: OFFLINE    use the DAT already in PROGDIR:Cache
  *   WHDUpdate Games: FTP        fetch it by FTP (it falls back to FTP anyway
  *                               when HTTP fails)
+ *   WHDUpdate Games: UPDATE     update the games with a newer pack, asking
+ *                               for each one (YES: without asking)
+ *   WHDUpdate Games: GAME=Lotus#?   only the games whose drawer name fits
  *
  * Return code 5 (WARN) when there are updates, 0 when there are none. */
 #include <exec/types.h>
@@ -27,6 +30,7 @@
 #include "dat.h"
 #include "match.h"
 #include "amiga.h"
+#include "update.h"
 
 #define HOST        "ftp2.grandis.nu"
 #define PACKDIR     "/turran/FTP/Retroplay WHDLoad Packs/"   /* web path */
@@ -37,14 +41,25 @@
 #define CACHE_NAME  "PROGDIR:Cache/Games.name"
 #define MAXZIP      (4UL * 1024 * 1024)
 #define SLAVEMAX    65536L
+#define LOGFILE     "PROGDIR:WHDUpdate.log"
+#define SETDIR      "Commodore_Amiga_-_WHDLoad_-_Games"
 
 static const char verstag[] __attribute__((used)) =
-    "$VER: WHDUpdate " WHDU_VERSION " (30.10.2026) Retroplay WHDLoad pack checker";
+    "$VER: WHDUpdate " WHDU_VERSION " (30.10.2026) WHDLoad game updater";
 
 struct Library *SocketBase = NULL;
 
-#define TEMPLATE "DIR/M,ALL/S,SHOWALL/S,REPORT/K,OFFLINE/S,FTP/S,DEPTH/K/N"
-enum { A_DIR, A_ALL, A_SHOWALL, A_REPORT, A_OFFLINE, A_FTP, A_DEPTH, A_COUNT };
+#define TEMPLATE "DIR/M,ALL/S,UPDATE/S,YES/S,GAME/K,SHOWALL/S,REPORT/K,OFFLINE/S,FTP/S,DEPTH/K/N"
+enum { A_DIR, A_ALL, A_UPDATE, A_YES, A_GAME, A_SHOWALL, A_REPORT, A_OFFLINE, A_FTP, A_DEPTH,
+       A_COUNT };
+
+/* a game with a newer pack, kept for UPDATE */
+typedef struct Todo {
+    struct Todo *next;
+    const Pack *pack;
+    char installed[16];
+    char path[1];
+} Todo;
 
 typedef struct {
     PackIndex ix;
@@ -54,6 +69,9 @@ typedef struct {
     BPTR report;
     long games, st[6];
     long printed;
+    char *pattern;          /* GAME=, parsed, or NULL */
+    int collect;            /* keep the updates in todo */
+    Todo *todo, **tail;
 } Run;
 
 int break_pressed(void)
@@ -240,11 +258,24 @@ static int on_game(void *ctx, const char *path, const char *name, const char *sl
     Match m;
     char line[700];
 
+    if (r->pattern && !MatchPatternNoCase((STRPTR)r->pattern, (STRPTR)name))
+        return break_pressed();
     if (!read_slave(r, path, slave, &si))
         memset(&si, 0, sizeof(si));
     match_game(&r->ix, name, slave, &si, &m);
     r->games++;
     r->st[m.status]++;
+    if (r->collect && m.status == M_UPDATE) {
+        Todo *t = (Todo *)malloc(sizeof(Todo) + strlen(path));
+        if (t) {
+            t->next = NULL;
+            t->pack = m.newest;
+            strcpy(t->installed, m.installed);
+            strcpy(t->path, path);
+            *r->tail = t;
+            r->tail = &t->next;
+        }
+    }
 
     if (r->showall || m.status == M_UPDATE || m.status == M_CHECK) {
         const char *iv = m.installed[0] ? m.installed : "?";
@@ -276,6 +307,87 @@ static int on_game(void *ctx, const char *path, const char *name, const char *sl
     return break_pressed();
 }
 
+/* y / n / a(ll) / q(uit); no input (not a console) counts as n */
+static int ask(const char *question)
+{
+    char buf[16];
+    LONG n;
+    printf("%s [y]es [n]o [a]ll [q]uit: ", question);
+    fflush(stdout);
+    n = Read(Input(), buf, sizeof(buf) - 1);
+    if (n <= 0) {
+        printf("(no answer - use YES to update without asking)\n");
+        return 'q';
+    }
+    buf[n] = 0;
+    switch (buf[0] | 32) {
+    case 'y': return 'y';
+    case 'a': return 'a';
+    case 'q': return 'q';
+    default:  return 'n';
+    }
+}
+
+static int do_updates(Run *r, int yes)
+{
+    UpdateConf c;
+    Todo *t;
+    int done = 0, failed = 0, n = 0, total = 0, first = 1;
+    char q[700];
+
+    for (t = r->todo; t; t = t->next)
+        total++;
+    if (!total) {
+        printf("Nothing to update.\n");
+        return 0;
+    }
+    if (!SocketBase) {
+        printf("Updating needs the network (no bsdsocket.library).\n");
+        return -1;
+    }
+    memset(&c, 0, sizeof(c));
+    c.host = HOST;
+    c.webdir = PACKDIR;
+    c.ftpdir = FTPDIR;
+    c.setdir = SETDIR;
+    c.ftp_only = r->ftp_only;
+    c.log = Open((STRPTR)LOGFILE, MODE_READWRITE);
+    if (c.log)
+        Seek(c.log, 0, OFFSET_END);
+    printf("\n%d game(s) to update. The old copies go to WHDUpdate-Old on the same volume.\n", total);
+    for (t = r->todo; t; t = t->next) {
+        int a = 'y';
+        n++;
+        if (!yes) {
+            snprintf(q, sizeof(q), "(%d/%d) %s %s -> %s (%lu KB)?", n, total, t->path,
+                     t->installed, t->pack->ver, (t->pack->size + 1023) / 1024);
+            a = ask(q);
+            if (a == 'q')
+                break;
+            if (a == 'n')
+                continue;
+            if (a == 'a')
+                yes = 1;
+        } else {
+            printf("(%d/%d) %s %s -> %s\n", n, total, t->path, t->installed, t->pack->ver);
+        }
+        if (!first)
+            Delay(100);                   /* two seconds between downloads: go easy on the server */
+        first = 0;
+        switch (update_game(&c, t->path, t->pack, t->installed)) {
+        case 0: done++; break;
+        case -2: printf("*** Stopped.\n"); t = NULL; break;
+        default: failed++;
+        }
+        if (!t)
+            break;
+    }
+    if (c.log)
+        Close(c.log);
+    printf("\n%d updated, %d failed. Log: %s\n", done, failed, LOGFILE);
+    return failed ? -1 : 0;
+}
+
 int main(void)
 {
     LONG args[A_COUNT] = {0};
@@ -293,7 +405,8 @@ int main(void)
     if (!args[A_DIR] && !args[A_ALL]) {
         printf("WHDUpdate " WHDU_VERSION " - checks your WHDLoad games against Retroplay's packs.\n"
                "Name the drawers your games are in, or ALL for every volume:\n"
-               "  WHDUpdate Games:  [SHOWALL] [REPORT=file] [OFFLINE] [FTP] [DEPTH=n]\n");
+               "  WHDUpdate Games:  [UPDATE [YES]] [GAME=pattern] [SHOWALL] [REPORT=file]\n"
+               "                    [OFFLINE] [FTP] [DEPTH=n]\n");
         FreeArgs(rda);
         return RETURN_WARN;
     }
@@ -301,6 +414,19 @@ int main(void)
         depth = (int)*(LONG *)args[A_DEPTH];
     run.showall = args[A_SHOWALL] != 0;
     run.ftp_only = args[A_FTP] != 0;
+    run.collect = args[A_UPDATE] != 0;
+    run.tail = &run.todo;
+    if (args[A_GAME]) {
+        LONG plen = (LONG)strlen((char *)args[A_GAME]) * 2 + 2;
+        run.pattern = (char *)malloc(plen);
+        if (!run.pattern || ParsePatternNoCase((STRPTR)args[A_GAME], (STRPTR)run.pattern, plen) < 0) {
+            printf("GAME=%s is not a pattern I can use\n", (char *)args[A_GAME]);
+            FreeArgs(rda);
+            return RETURN_ERROR;
+        }
+    }
+    if (run.collect)
+        IconBase = OpenLibrary((STRPTR)"icon.library", 37);
     run.slavebuf = (unsigned char *)malloc(SLAVEMAX);
     if (!args[A_OFFLINE]) {
         SocketBase = OpenLibrary((STRPTR)"bsdsocket.library", 4);
@@ -352,10 +478,24 @@ int main(void)
         printf("\"check\": the two versions can be read either way (1.51 vs 1.6).\n");
     if (run.st[M_UPDATE])
         rc = RETURN_WARN;
+    if (run.collect && !stopped) {
+        if (do_updates(&run, args[A_YES] != 0) == 0)
+            rc = RETURN_OK;
+        else
+            rc = RETURN_WARN;
+    }
 
 done:
     if (run.report)
         Close(run.report);
+    while (run.todo) {
+        Todo *t = run.todo->next;
+        free(run.todo);
+        run.todo = t;
+    }
+    free(run.pattern);
+    if (IconBase)
+        CloseLibrary(IconBase);
     packs_free(&run.ix);
     free(run.slavebuf);
     if (SocketBase)

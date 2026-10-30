@@ -15,7 +15,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <proto/dos.h>
 #include "amiga.h"
+#include "dat.h"
 
 #define TIMEOUT_SECS 30
 
@@ -347,6 +349,158 @@ unsigned char *ftp_get(const char *host, const char *path,
                        unsigned long *len, unsigned long maxlen)
 {
     return ftp_fetch(host, path, 0, len, maxlen);
+}
+
+/* ---- downloads to a file ---------------------------------------------- */
+
+/* Write what arrives on fd to fh until the other side closes; first[] is
+ * data already received. Shows progress, keeps the CRC. */
+static int recv_to_file(LONG fd, BPTR fh, const unsigned char *first, unsigned long nfirst,
+                        unsigned long expect, unsigned long *got, unsigned long *crc)
+{
+    static unsigned char buf[8192];
+    unsigned long shown = 0;
+    *got = 0;
+    *crc = 0;
+    if (nfirst) {
+        if (Write(fh, (APTR)first, nfirst) != (LONG)nfirst)
+            return -1;
+        *crc = crc32_update(*crc, first, nfirst);
+        *got = nfirst;
+    }
+    for (;;) {
+        LONG n, w = wait_readable(fd);
+        if (w < 0) {
+            printf("\nWHDUpdate: stopped\n");
+            return -1;
+        }
+        if (w == 0) {
+            printf("\nWHDUpdate: the server stopped answering\n");
+            return -1;
+        }
+        n = recv(fd, buf, sizeof(buf), 0);
+        if (n < 0) {
+            printf("\nWHDUpdate: the connection broke\n");
+            return -1;
+        }
+        if (n == 0)
+            break;
+        if (Write(fh, buf, n) != n) {
+            printf("\nWHDUpdate: cannot write the download (disk full?)\n");
+            return -1;
+        }
+        *crc = crc32_update(*crc, buf, n);
+        *got += n;
+        if (expect && *got - shown >= 65536) {
+            shown = *got;
+            printf("\r  %lu of %lu KB", *got / 1024, expect / 1024);
+            fflush(stdout);
+        }
+    }
+    if (shown)
+        printf("\r                              \r");
+    return 0;
+}
+
+int http_download(const char *host, const char *path, BPTR fh,
+                  unsigned long expect, unsigned long *got, unsigned long *crc)
+{
+    char req[768];
+    unsigned char hdr[4096];
+    unsigned long have = 0;
+    LONG fd, status;
+    ULONG addr;
+    char *end;
+    int rc;
+
+    *got = 0;
+    if (!resolve(host, &addr))
+        return -1;
+    fd = tcp_connect(addr, 80);
+    if (fd < 0) {
+        printf("WHDUpdate: cannot connect to %s\n", host);
+        return -1;
+    }
+    snprintf(req, sizeof(req),
+             "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: WHDUpdate/" WHDU_VERSION " (AmigaOS)\r\n"
+             "Connection: close\r\n\r\n", path, host);
+    if (!send_all(fd, req)) {
+        CloseSocket(fd);
+        return -1;
+    }
+    /* the headers, then whatever came with them */
+    for (;;) {
+        LONG n;
+        if (have >= sizeof(hdr) - 1 || wait_readable(fd) <= 0 ||
+            (n = recv(fd, hdr + have, sizeof(hdr) - 1 - have, 0)) <= 0) {
+            printf("WHDUpdate: %s sent no proper reply\n", host);
+            CloseSocket(fd);
+            return -1;
+        }
+        have += n;
+        hdr[have] = 0;
+        if ((end = strstr((char *)hdr, "\r\n\r\n")) != NULL)
+            break;
+    }
+    status = strncmp((char *)hdr, "HTTP/1.", 7) ? 0 : atol((char *)hdr + 9);
+    if (status != 200) {
+        printf("WHDUpdate: %s answered %ld\n", host, (long)status);
+        CloseSocket(fd);
+        return -1;
+    }
+    end += 4;
+    rc = recv_to_file(fd, fh, (unsigned char *)end, have - ((unsigned char *)end - hdr), expect, got, crc);
+    CloseSocket(fd);
+    return rc;
+}
+
+int ftp_download(const char *host, const char *path, BPTR fh,
+                 unsigned long expect, unsigned long *got, unsigned long *crc)
+{
+    char reply[512];
+    LONG cfd, dfd = -1;
+    ULONG addr;
+    int code, h1, h2, h3, h4, p1, p2, rc = -1;
+    const char *p;
+
+    *got = 0;
+    if (!resolve(host, &addr))
+        return -1;
+    cfd = tcp_connect(addr, 21);
+    if (cfd < 0) {
+        printf("WHDUpdate: cannot connect to %s by FTP\n", host);
+        return -1;
+    }
+    reply[0] = 0;
+    if (ftp_reply(cfd, reply, sizeof(reply)) != 220 ||
+        ((code = ftp_cmd(cfd, "USER", "ftp", reply, sizeof(reply))) != 331 && code != 230) ||
+        (code == 331 && ftp_cmd(cfd, "PASS", "amiga", reply, sizeof(reply)) != 230) ||
+        ftp_cmd(cfd, "TYPE", "I", reply, sizeof(reply)) != 200 ||
+        ftp_cmd(cfd, "PASV", NULL, reply, sizeof(reply)) != 227 ||
+        !(p = strchr(reply, '(')) ||
+        sscanf(p + 1, "%d,%d,%d,%d,%d,%d", &h1, &h2, &h3, &h4, &p1, &p2) != 6) {
+        printf("WHDUpdate: FTP login failed: %s\n", reply);
+        goto done;
+    }
+    dfd = tcp_connect((ULONG)h1 << 24 | (ULONG)h2 << 16 | (ULONG)h3 << 8 | (ULONG)h4, p1 * 256 + p2);
+    if (dfd < 0)
+        goto done;
+    code = ftp_cmd(cfd, "RETR", path, reply, sizeof(reply));
+    if (code != 150 && code != 125) {
+        printf("WHDUpdate: FTP: %s\n", reply);
+        goto done;
+    }
+    rc = recv_to_file(dfd, fh, NULL, 0, expect, got, crc);
+    CloseSocket(dfd);
+    dfd = -1;
+    if (rc == 0 && ftp_reply(cfd, reply, sizeof(reply)) != 226)
+        rc = -1;
+done:
+    if (dfd >= 0)
+        CloseSocket(dfd);
+    send_all(cfd, "QUIT\r\n");
+    CloseSocket(cfd);
+    return rc;
 }
 
 unsigned char *ftp_list(const char *host, const char *dir,
