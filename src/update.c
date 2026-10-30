@@ -632,6 +632,19 @@ int update_game(const UpdateConf *c, const char *path, const Pack *p, const char
     }
     delete_tree(work);
 
+    /* Which pack this drawer now holds, for the next check: the slave does
+     * not always carry the pack's whole version (2.1 in SevenCitiesOfGold
+     * v2.1b). The same file and name WHDFetch writes. */
+    {
+        char mark[P];
+        BPTR fh;
+        cat_path(mark, path, "ArchiveName.txt");
+        if ((fh = Open((STRPTR)mark, MODE_NEWFILE)) != 0) {
+            FPuts(fh, (STRPTR)p->file);
+            FPuts(fh, (STRPTR)"\n");
+            Close(fh);
+        }
+    }
     slave_version(path, ver, sizeof(ver));
     say("  updated to %s%s; the old one is in %s", ver[0] ? ver : p->ver,
            kept ? ", saves kept" : "", backup);

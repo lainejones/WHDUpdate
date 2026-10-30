@@ -20,8 +20,9 @@ DEPTH=n                              how many drawer levels to look down (3)
 ## The window
 
 Double-click the icon (or `WHDUpdate GUI` in a Shell): type the drawers your games are
-in - several with `;` between them, or `ALL` - and press **Check**. Click a game to mark
-it (`*`), or **Mark all**, then **Update marked**. **Show** picks what the list shows:
+in - several with `;` between them, or `ALL` - and press **Check**. Type part of a name in **Find** and
+the list shows only those games. Click a game to mark it (`*`) - the game you clicked
+stays highlighted - or **Mark all** (the games the list shows), then **Update marked**. **Show** picks what the list shows:
 the updates, all games, the ones to check by hand, the ones not found, or the ones whose
 slave has no version. **Stop** ends a check or the updates between two steps. The drawers
 are remembered (`ENVARC:WHDUpdate.dirs`), and the next start checks right away.
@@ -67,7 +68,8 @@ For each game you say yes to, WHDUpdate:
    its place, under the old name. If that fails, the old one goes back.
 
 Nothing changes until step 5, and the old copy stays in `WHDUpdate-Old` until you delete
-it. Every update is logged in `PROGDIR:WHDUpdate.log`. Downloads are one at a time with a
+it. Every update is logged in `PROGDIR:WHDUpdate.log`, and the drawer gets an `ArchiveName.txt`
+naming the pack (as WHDFetch writes it), which later checks trust over the slave's version. Downloads are one at a time with a
 pause between them, to go easy on the server.
 
 Needs Kickstart 2.04 or newer, any 680x0, and a TCP/IP stack with

@@ -229,6 +229,48 @@ static int read_slave(Engine *e, const char *path, const char *slave, SlaveInfo 
     return n > 0 && slave_parse(e->slavebuf, n, si);
 }
 
+/* ArchiveName.txt in the drawer (written after an update here, or by
+ * WHDFetch) names the pack installed: that beats the slave's version, which
+ * can lack the pack's letter (2.1 for v2.1b). */
+static void installed_pack(Engine *e, const char *path, Match *m)
+{
+    char full[600], name[200];
+    BPTR fh;
+    LONG n;
+    int i, l = (int)strlen(path);
+    if (l + 20 > (int)sizeof(full))
+        return;
+    strcpy(full, path);
+    if (l && path[l - 1] != ':' && path[l - 1] != '/')
+        strcat(full, "/");
+    strcat(full, "ArchiveName.txt");
+    if (!(fh = Open((STRPTR)full, MODE_OLDFILE)))
+        return;
+    n = Read(fh, name, sizeof(name) - 1);
+    Close(fh);
+    if (n <= 0)
+        return;
+    name[n] = 0;
+    for (i = 0; name[i] && name[i] != '\n' && name[i] != '\r'; i++)
+        ;
+    name[i] = 0;
+    if (m->newest && !strcmp(name, m->newest->file)) {
+        m->status = M_CURRENT;                    /* the newest pack is what's there */
+        strncpy(m->installed, m->newest->ver, sizeof(m->installed) - 1);
+        return;
+    }
+    for (i = 0; i < e->ix.n; i++)                 /* an older pack of this game */
+        if (!strcmp(e->ix.packs[i].file, name)) {
+            strncpy(m->installed, e->ix.packs[i].ver, sizeof(m->installed) - 1);
+            if (m->newest) {
+                int c = version_cmp(m->installed, m->newest->ver);
+                m->status = c == VERSION_UNSURE ? M_CHECK : c < 0 ? M_UPDATE :
+                            c > 0 ? M_NEWER : M_CURRENT;
+            }
+            return;
+        }
+}
+
 static int on_game(void *ctx, const char *path, const char *name, const char *slave)
 {
     Engine *e = (Engine *)ctx;
@@ -242,6 +284,7 @@ static int on_game(void *ctx, const char *path, const char *name, const char *sl
     if (!read_slave(e, path, slave, &si))
         memset(&si, 0, sizeof(si));
     match_game(&e->ix, name, slave, &si, &m);
+    installed_pack(e, path, &m);
 
     if (e->n == e->cap) {
         long nc = e->cap ? e->cap * 2 : 512;

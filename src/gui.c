@@ -8,7 +8,8 @@
  * when the screen font is proportional.
  *
  *   Drawers [Games1:Games;Games2:              ] [Check]
- *   [2594 games: 1116 updates, 9 to check     ] Show <Updates>
+ *   Find    [lemm             ]       Show <Updates>
+ *   [2594 games: 1116 updates, 9 to check, 2 marked     ]
  *   +----------------------------------------------------+
  *   |* update   Cabal                       1.2a > 1.3   |
  *   |  update   CastleVania                 1.1 > 1.2    |
@@ -45,7 +46,7 @@ struct Library *GadToolsBase = NULL;
 #define M 6                       /* margin */
 #define GAP 4
 
-enum { G_DIRS, G_CHECK, G_SUMMARY, G_SHOW, G_LIST, G_UPDATE, G_MARKALL, G_MARKNONE, G_STOP,
+enum { G_DIRS, G_CHECK, G_FIND, G_SUMMARY, G_SHOW, G_LIST, G_UPDATE, G_MARKALL, G_MARKNONE, G_STOP,
        G_STATUS, G_COUNT };
 
 static const char *show_labels[] = {"Updates", "All games", "To check", "Not found", "No version", NULL};
@@ -63,7 +64,10 @@ static struct {
     struct RastPort mrp;          /* for measuring text */
     struct List list;
     int filter, busy, stop, quit, cols;
+    Game *sel;                    /* the game clicked last: stays highlighted */
+    long top;                     /* the list's scroll position */
     char dirs[400], status[200], summary[120];
+    char find[40];                /* part of a name: only those games are shown */
 } G;
 
 /* ---- small helpers ------------------------------------------------------ */
@@ -112,8 +116,24 @@ static void save_dirs(void)
 
 /* ---- the list ------------------------------------------------------------ */
 
+/* Does name contain part, ignoring case? */
+static int contains(const char *name, const char *part)
+{
+    for (; *name; name++) {
+        const char *a = name, *b = part;
+        while (*b && *a && ((*a >= 'A' && *a <= 'Z' ? *a | 32 : *a) ==
+                            (*b >= 'A' && *b <= 'Z' ? *b | 32 : *b)))
+            a++, b++;
+        if (!*b)
+            return 1;
+    }
+    return !*part;
+}
+
 static int shown(const Game *g)
 {
+    if (G.find[0] && !contains(g->name, G.find))
+        return 0;
     switch (G.filter) {
     case 0: return g->status == M_UPDATE;
     case 2: return g->status == M_CHECK || g->status == M_NEWER;
@@ -145,16 +165,42 @@ static void make_label(Game *g)
     g->node.ln_Name = g->label;
 }
 
+/* Where the list is scrolled to: kept across a redraw (GadTools 39+ can be
+ * asked; 2.04 starts at the top again). */
+static void remember_top(void)
+{
+    ULONG top = 0;
+    if (G.win && G.g[G_LIST] && GadToolsBase->lib_Version >= 39 &&
+        GT_GetGadgetAttrs(G.g[G_LIST], G.win, NULL, GTLV_Top, (ULONG)&top, TAG_END) == 1)
+        G.top = (long)top;
+}
+
+/* The clicked game's place in the list shown, or ~0 when it isn't in it. */
+static ULONG sel_index(void)
+{
+    struct Node *nd;
+    ULONG i = 0;
+    if (!G.sel)
+        return ~0UL;
+    for (nd = G.list.lh_Head; nd->ln_Succ; nd = nd->ln_Succ, i++)
+        if (nd == &G.sel->node)
+            return i;
+    return ~0UL;
+}
+
 static void detach_list(void)
 {
-    if (G.win && G.g[G_LIST])
+    if (G.win && G.g[G_LIST]) {
+        remember_top();
         GT_SetGadgetAttrs(G.g[G_LIST], G.win, NULL, GTLV_Labels, ~0UL, TAG_END);
+    }
 }
 
 static void attach_list(void)
 {
     if (G.win && G.g[G_LIST])
-        GT_SetGadgetAttrs(G.g[G_LIST], G.win, NULL, GTLV_Labels, (ULONG)&G.list, TAG_END);
+        GT_SetGadgetAttrs(G.g[G_LIST], G.win, NULL, GTLV_Labels, (ULONG)&G.list,
+                          GTLV_Top, G.top, GTLV_Selected, sel_index(), TAG_END);
 }
 
 static void rebuild_list(void)
@@ -206,8 +252,8 @@ static int min_width(void)
 
 static int min_height(void)
 {
-    /* four rows of gadgets + a list of at least four lines */
-    return 4 + 4 * bh() + 4 * GAP + 4 * G.lvfont->tf_YSize + 4 + 4;
+    /* five rows of gadgets + a list of at least four lines */
+    return 4 + 5 * bh() + 5 * GAP + 4 * G.lvfont->tf_YSize + 4 + 4;
 }
 
 static int make_gadgets(void)
@@ -245,24 +291,34 @@ static int make_gadgets(void)
     ng.ng_Flags = PLACETEXT_IN;
     G.g[G_CHECK] = gad = CreateGadget(BUTTON_KIND, gad, &ng, GA_Disabled, G.busy, TAG_END);
 
-    /* [summary] Show <cycle> */
+    /* Find [....] Show <cycle> */
     y = top + h + GAP;
+    lw = tlen("Drawers") + 8;                 /* lined up with the Drawers field */
     cw = tlen("No version") + 32;
-    lw = tlen("Show") + 8;
-    ng.ng_LeftEdge = left;
+    ng.ng_LeftEdge = left + lw;
     ng.ng_TopEdge = y;
-    ng.ng_Width = right - left - cw - lw - GAP;
-    ng.ng_GadgetText = NULL;
-    ng.ng_GadgetID = G_SUMMARY;
-    G.g[G_SUMMARY] = gad = CreateGadget(TEXT_KIND, gad, &ng, GTTX_Text, (ULONG)G.summary,
-                                        GTTX_CopyText, TRUE, GTTX_Border, TRUE, TAG_END);
+    ng.ng_Width = right - left - lw - GAP - (tlen("Show") + 8) - cw;
+    ng.ng_GadgetText = (UBYTE *)"Find";
+    ng.ng_GadgetID = G_FIND;
+    ng.ng_Flags = PLACETEXT_LEFT;
+    G.g[G_FIND] = gad = CreateGadget(STRING_KIND, gad, &ng, GTST_String, (ULONG)G.find,
+                                     GTST_MaxChars, sizeof(G.find) - 1, TAG_END);
     ng.ng_LeftEdge = right - cw;
     ng.ng_Width = cw;
     ng.ng_GadgetText = (UBYTE *)"Show";
     ng.ng_GadgetID = G_SHOW;
-    ng.ng_Flags = PLACETEXT_LEFT;
     G.g[G_SHOW] = gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)show_labels,
                                      GTCY_Active, G.filter, GA_Disabled, G.busy, TAG_END);
+
+    /* [summary] */
+    y += h + GAP;
+    ng.ng_LeftEdge = left;
+    ng.ng_TopEdge = y;
+    ng.ng_Width = right - left;
+    ng.ng_GadgetText = NULL;
+    ng.ng_GadgetID = G_SUMMARY;
+    G.g[G_SUMMARY] = gad = CreateGadget(TEXT_KIND, gad, &ng, GTTX_Text, (ULONG)G.summary,
+                                        GTTX_CopyText, TRUE, GTTX_Border, TRUE, TAG_END);
 
     /* the list */
     y += h + GAP;
@@ -277,7 +333,10 @@ static int make_gadgets(void)
     G.cols = (ng.ng_Width - 24) / G.lvfont->tf_XSize;
     if (G.cols > (int)sizeof(((Game *)0)->label) - 1)
         G.cols = sizeof(((Game *)0)->label) - 1;
-    G.g[G_LIST] = gad = CreateGadget(LISTVIEW_KIND, gad, &ng, GTLV_Labels, (ULONG)&G.list, TAG_END);
+    /* ShowSelected NULL: the clicked game stays highlighted */
+    G.g[G_LIST] = gad = CreateGadget(LISTVIEW_KIND, gad, &ng, GTLV_Labels, (ULONG)&G.list,
+                                     GTLV_ShowSelected, 0, GTLV_Selected, ~0UL,
+                                     GTLV_Top, G.top, TAG_END);
     ng.ng_TextAttr = &G.ta;
 
     /* the buttons */
@@ -312,6 +371,8 @@ static void relayout(void)
     if (G.glist) {
         if (G.g[G_DIRS])
             strcpy(G.dirs, (char *)((struct StringInfo *)G.g[G_DIRS]->SpecialInfo)->Buffer);
+        if (G.g[G_FIND])
+            strcpy(G.find, (char *)((struct StringInfo *)G.g[G_FIND]->SpecialInfo)->Buffer);
         detach_list();
         RemoveGList(w, G.glist, -1);
         FreeGadgets(G.glist);
@@ -414,6 +475,8 @@ static void do_check(void)
     set_busy(1);
     detach_list();
     new_list(&G.list);
+    G.sel = NULL;                 /* the games are about to be freed */
+    G.top = 0;
     engine_clear(e);
     attach_list();
     set_summary();
@@ -494,13 +557,34 @@ static void do_update(void)
         G.stop ? " (stopped), " : ", ", failed, LOGFILE);
 }
 
+/* Mark all / Mark none: only the games the list shows (Find and Show), so a
+ * search picks the ones to update; games marked earlier stay marked. */
 static void mark_all(int on)
 {
     long i;
-    for (i = 0; i < G.e->n; i++)
-        G.e->games[i]->marked = on && G.e->games[i]->status == M_UPDATE;
+    for (i = 0; i < G.e->n; i++) {
+        Game *g = G.e->games[i];
+        if (shown(g))
+            g->marked = on && g->status == M_UPDATE;
+    }
     rebuild_list();
     set_summary();
+}
+
+/* The Find field changed (typed into, checked ten times a second): show
+ * only the games whose names contain it. */
+static void find_changed(void)
+{
+    const char *now;
+    if (!G.g[G_FIND])
+        return;
+    now = (const char *)((struct StringInfo *)G.g[G_FIND]->SpecialInfo)->Buffer;
+    if (!strcmp(now, G.find))
+        return;
+    strncpy(G.find, now, sizeof(G.find) - 1);
+    detach_list();
+    G.top = 0;
+    rebuild_list();
 }
 
 /* ---- the window ---------------------------------------------------------- */
@@ -588,7 +672,7 @@ int gui_main(struct Engine *e, const char *dirs)
         WA_DragBar, TRUE, WA_DepthGadget, TRUE, WA_CloseGadget, TRUE, WA_SizeGadget, TRUE,
         WA_SizeBBottom, TRUE, WA_Activate, TRUE, WA_SimpleRefresh, TRUE, WA_NewLookMenus, TRUE,
         WA_IDCMP, BUTTONIDCMP | LISTVIEWIDCMP | STRINGIDCMP | CYCLEIDCMP | IDCMP_CLOSEWINDOW |
-                  IDCMP_NEWSIZE | IDCMP_REFRESHWINDOW,
+                  IDCMP_NEWSIZE | IDCMP_REFRESHWINDOW | IDCMP_INTUITICKS,
         TAG_END);
     if (!G.win)
         goto done;
@@ -611,6 +695,10 @@ int gui_main(struct Engine *e, const char *dirs)
             case IDCMP_CLOSEWINDOW:
                 G.quit = 1;
                 break;
+            case IDCMP_INTUITICKS:            /* the list follows the Find field as you type */
+                if (!G.busy)
+                    find_changed();
+                break;
             case IDCMP_NEWSIZE:
                 relayout();
                 break;
@@ -620,16 +708,22 @@ int gui_main(struct Engine *e, const char *dirs)
                 break;
             case IDCMP_GADGETUP:
                 switch (gad->GadgetID) {
+                case G_FIND:
+                    find_changed();
+                    break;
                 case G_DIRS:              /* Return in the string: check */
                 case G_CHECK:
                     do_check();
                     break;
                 case G_SHOW:
                     G.filter = code;
+                    detach_list();
+                    G.top = 0;                /* another list: from its top */
                     rebuild_list();
                     break;
                 case G_LIST: {
                     Game *g = nth_shown(code);
+                    G.sel = g;                /* stays highlighted, marked or not */
                     if (g && markable(g)) {
                         g->marked = !g->marked;
                         rebuild_list();
@@ -637,6 +731,7 @@ int gui_main(struct Engine *e, const char *dirs)
                     } else if (g) {
                         gui_status(g->status == M_CURRENT ? "That one is up to date" :
                                    "No pack to update that one from");
+                        rebuild_list();
                     }
                     break;
                 }
