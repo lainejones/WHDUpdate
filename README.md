@@ -40,19 +40,19 @@ The return code is 5 (WARN) when there are updates.
 
 For each game you say yes to, WHDUpdate:
 
-1. downloads the pack into  and checks its size and CRC
+1. downloads the pack into `<volume>:WHDUpdate-Old/.work/` and checks its size and CRC
    against the pack list;
-2. unpacks it there with  ( for the few  packs);
+2. unpacks it there with `C:LhA` (`C:UNLZX` for the few `.lzx` packs);
 3. copies your saves and high scores from the old drawer into the new one - the ones
    the pack doesn't have, and the ones it has fresh (empty high scores): yours win;
 4. gives the new icons the places of the old ones and keeps the tooltypes you added or
-   changed (..., , ...) - with OS 3.5+ icon.library only, as an older
+   changed (`CUSTOM1`..., `PRELOAD`, ...) - with OS 3.5+ icon.library only, as an older
    one would lose a colour icon's image when writing it back;
-5. moves the old drawer and its icon to  and the new one into
+5. moves the old drawer and its icon to `<volume>:WHDUpdate-Old/` and the new one into
    its place, under the old name. If that fails, the old one goes back.
 
-Nothing changes until step 5, and the old copy stays in  until you delete
-it. Every update is logged in . Downloads are one at a time with a
+Nothing changes until step 5, and the old copy stays in `WHDUpdate-Old` until you delete
+it. Every update is logged in `PROGDIR:WHDUpdate.log`. Downloads are one at a time with a
 pause between them, to go easy on the server.
 
 Needs Kickstart 2.04 or newer, any 680x0, and a TCP/IP stack with
