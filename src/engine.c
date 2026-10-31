@@ -464,6 +464,7 @@ static int on_game(void *ctx, const char *path, const char *name, const char *sl
     g->status = m.status;
     strcpy(g->installed, m.installed);
     g->pack = m.newest;
+    g->family = e->cur_family;
     e->games[e->n++] = g;
     e->st[m.status]++;
     if (e->seen)
@@ -485,6 +486,7 @@ static unsigned long family_sets(const Engine *e, int fam)
 
 int engine_scan(Engine *e, const char *root, int depth, int fam)
 {
+    e->cur_family = fam;
     match_sets = family_sets(e, fam);
     match_allowed = e->prefs.allowed;
     if (!strcmp(root, "ALL") || !strcmp(root, "all")) {
@@ -527,6 +529,92 @@ int engine_scan_all(Engine *e, int depth)
         }
     }
     return 0;
+}
+
+static int add_game(Engine *e, Game *g)
+{
+    if (e->n == e->cap) {
+        long nc = e->cap ? e->cap * 2 : 512;
+        Game **ng = (Game **)realloc(e->games, nc * sizeof(Game *));
+        if (!ng)
+            return 0;
+        e->games = ng;
+        e->cap = nc;
+    }
+    e->games[e->n++] = g;
+    e->st[g->status]++;
+    return 1;
+}
+
+/* The drawer name a pack unpacks to: its base and variant words, without the
+ * version and the numbers - "Corporation&Missions_v1.4_2Disk_0107&0266.lha"
+ * is "Corporation&Missions2Disk". */
+static void pack_title(const char *file, char *out, int size)
+{
+    const char *p = file, *v = strstr(file, "_v");
+    int o = 0;
+    while (*p && p != v && *p != '.' && o < size - 1)
+        out[o++] = *p++;
+    if (v) {
+        p = strchr(v + 1, '_');                       /* the words after the version */
+        while (p && *p == '_') {
+            const char *q = ++p;
+            int digits = 1;
+            while (*q && *q != '_' && *q != '.') {
+                if (!((*q >= '0' && *q <= '9') || *q == '&'))
+                    digits = 0;
+                q++;
+            }
+            if (!digits)
+                while (p < q && o < size - 1)
+                    out[o++] = *p++;
+            p = *q == '_' ? q : NULL;
+        }
+    }
+    out[o] = 0;
+}
+
+static void on_missing(void *ctx, const Pack *p)
+{
+    Engine *e = (Engine *)ctx;
+    char name[100];
+    Game *g;
+    pack_title(p->file, name, sizeof(name));
+    g = (Game *)malloc(sizeof(Game) + strlen(name) + 1);
+    if (!g)
+        return;
+    memset(g, 0, sizeof(Game));
+    g->name = (char *)(g + 1);
+    strcpy((char *)g->name, name);
+    g->status = M_MISSING;
+    g->pack = p;
+    g->family = pack_sets[p->set].family;
+    if (!add_game(e, g))
+        free(g);
+}
+
+static int cmp_base(const void *a, const void *b)
+{
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+void engine_missing(Engine *e)
+{
+    const char **present;
+    long i, n = 0, have = e->n;
+    if (!e->have_dat)
+        return;
+    present = (const char **)malloc((have + 1) * sizeof(char *));
+    if (!present)
+        return;
+    for (i = 0; i < have; i++)
+        if (e->games[i]->pack)
+            present[n++] = e->games[i]->pack->base;
+    qsort(present, n, sizeof(char *), cmp_base);
+    match_sets = e->dat_sets;
+    match_allowed = e->prefs.allowed;
+    packs_missing(&e->ix, present, n, on_missing, e);
+    free(present);
 }
 
 BPTR engine_open_log(void)

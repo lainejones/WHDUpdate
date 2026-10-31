@@ -7,7 +7,7 @@
 #   make test     host checks of the platform-neutral code
 #   make clean
 
-VERSION = 0.6.1
+VERSION = 0.6.2
 CC      = m68k-amigaos-gcc
 CFLAGS  = -m68000 -O2 -noixemul -Wall -Wno-pointer-sign -fomit-frame-pointer \
           -DWHDU_VERSION=\"$(VERSION)\"

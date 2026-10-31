@@ -561,6 +561,21 @@ void match_game(const PackIndex *ix, const char *drawer, const char *slavefile,
         }
     }
 
+    /* 4DSportsDriving&MstrTrcks: the slave's name gave the plain game, but
+     * the drawer says more, and that more abbreviates a longer pack of it
+     * (4DSportsDriving&MasterTracks) - that one it is */
+    if (p && m->how >= HOW_SLAVEFILE) {
+        int pl = (int)strlen(p->full), v2 = 0, how2 = 0;
+        const Pack *q;
+        if ((int)strlen(k) > pl && !strncmp(k, p->full, pl) &&
+            (q = abbreviation(ix, k, &v2, &how2)) != NULL &&
+            (int)strlen(q->full) > pl && !strncmp(q->full, p->full, pl)) {
+            p = q;
+            variants = v2;
+            m->how = how2;
+        }
+    }
+
     if (!p)
         p = abbreviation(ix, k, &variants, &m->how);
 
@@ -585,6 +600,38 @@ const char *status_word(int status)
     case M_UPDATE:  return "UPDATE";
     case M_NEWER:   return "newer";
     case M_CHECK:   return "check";
+    case M_MISSING: return "missing";
     default:        return "no-match";
+    }
+}
+
+static int cmp_str(const void *a, const void *b)
+{
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+void packs_missing(const PackIndex *ix, const char *const *present, long npresent,
+                   void (*found)(void *ctx, const Pack *p), void *ctx)
+{
+    unsigned long sets = match_sets;
+    int i = 0, s;
+    while (i < ix->n) {
+        const char *b = ix->packs[ix->bybase[i]].base;
+        int lo = i, hi = i;
+        while (hi < ix->n && !strcmp(ix->packs[ix->bybase[hi]].base, b))
+            hi++;
+        i = hi;
+        if (npresent && bsearch(&b, present, npresent, sizeof(char *), cmp_str))
+            continue;
+        for (s = 0; s < 32; s++) {
+            const Pack *p;
+            if (!((sets >> s) & 1))
+                continue;
+            match_sets = 1UL << s;
+            p = newest(ix, ix->bybase, lo, hi, ANY_LOCAL, NULL);
+            if (p)
+                found(ctx, p);
+        }
+        match_sets = sets;
     }
 }

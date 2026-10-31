@@ -28,7 +28,8 @@ typedef struct {
     int *byfull, *bybase;  /* indexes into packs, sorted by full / base */
 } PackIndex;
 
-enum { M_NOMATCH, M_UNKNOWN, M_CURRENT, M_UPDATE, M_NEWER, M_CHECK };
+/* M_MISSING: a pack no installed game has (the window lists these too) */
+enum { M_NOMATCH, M_UNKNOWN, M_CURRENT, M_UPDATE, M_NEWER, M_CHECK, M_MISSING, M_COUNT };
 enum { HOW_NONE, HOW_NAME, HOW_BASE, HOW_PREFIX, HOW_SLAVEFILE, HOW_SLAVENAME, HOW_ABBREV };
 
 typedef struct {
@@ -69,5 +70,11 @@ void match_game(const PackIndex *ix, const char *drawer, const char *slavefile,
 void norm_name(const char *in, char *out, int size);
 
 const char *status_word(int status);
+
+/* Every game in the sets of match_sets that none of the installed games is:
+ * for each pack base not in present (sorted, strcmp), the newest pack of
+ * each set whose variants are all allowed (match_allowed). */
+void packs_missing(const PackIndex *ix, const char *const *present, long npresent,
+                   void (*found)(void *ctx, const Pack *p), void *ctx);
 
 #endif

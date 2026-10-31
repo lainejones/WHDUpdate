@@ -46,10 +46,14 @@ struct Library *GadToolsBase = NULL;
 #define M 6                       /* margin */
 #define GAP 4
 
-enum { G_DIRS, G_CHECK, G_FIND, G_SUMMARY, G_SHOW, G_LIST, G_UPDATE, G_MARKALL, G_MARKNONE, G_STOP,
-       G_STATUS, G_COUNT };
+enum { G_DIRS, G_CHECK, G_FIND, G_SUMMARY, G_SET, G_SHOW, G_LIST, G_UPDATE, G_MARKALL, G_MARKNONE,
+       G_STOP, G_STATUS, G_COUNT };
 
-static const char *show_labels[] = {"Updates", "All games", "To check", "Not found", "No version", NULL};
+static const char *show_labels[] = {"Updates", "All games", "To check", "Not found", "No version",
+                                    "Missing", NULL};
+/* which pack set the list shows: 0 = all of them, else pack_sets[n - 1] */
+static const char *set_labels[] = {"All sets", "Games", "Games Beta", "Demos", "Demos Beta",
+                                   "Magazines", NULL};
 
 enum { MN_CHECK = 1, MN_UPDATE, MN_ABOUT, MN_QUIT, MN_SERVER, MN_SETS, MN_LANG, MN_SYS, MN_FTPONLY };
 
@@ -82,7 +86,7 @@ static struct {
     struct TextFont *font, *lvfont;
     struct RastPort mrp;          /* for measuring text */
     struct List list;
-    int filter, busy, stop, quit, cols;
+    int filter, set, busy, stop, quit, cols;
     Game *sel;                    /* the game clicked last: stays highlighted */
     long top;                     /* the list's scroll position */
     char dirs[400], status[200], summary[120];
@@ -134,15 +138,34 @@ static int contains(const char *name, const char *part)
     return !*part;
 }
 
+/* Is g in the set the Set cycle picks? A game goes by the set its pack is
+ * from; one with no pack by the family of the drawer it is in (shown with
+ * the family's main set). */
+static int in_set(const Game *g)
+{
+    int s = G.set - 1;
+    if (s < 0)
+        return 1;
+    if (g->pack)
+        return g->pack->set == s;
+    return g->family == pack_sets[s].family &&
+           (s == SET_GAMES || s == SET_DEMOS || s == SET_MAGS);
+}
+
 static int shown(const Game *g)
 {
     if (G.find[0] && !contains(g->name, G.find))
         return 0;
+    if (!in_set(g))
+        return 0;
+    if (g->status == M_MISSING)               /* not installed: only under Missing */
+        return G.filter == 5;
     switch (G.filter) {
     case 0: return g->status == M_UPDATE;
     case 2: return g->status == M_CHECK || g->status == M_NEWER;
     case 3: return g->status == M_NOMATCH;
     case 4: return g->status == M_UNKNOWN;
+    case 5: return 0;
     default: return 1;
     }
 }
@@ -154,11 +177,14 @@ static int markable(const Game *g)
 
 static void make_label(Game *g)
 {
-    static const char *words[] = {"not found", "no version", "current", "update", "newer", "check"};
+    static const char *words[] = {"not found", "no version", "current", "update", "newer", "check",
+                                  "missing"};
     char vers[40];
     int namew;
     if (!g->pack)
         vers[0] = 0;
+    else if (g->status == M_MISSING)
+        snprintf(vers, sizeof(vers), "%s", g->pack->ver);
     else
         snprintf(vers, sizeof(vers), "%s > %s", g->installed[0] ? g->installed : "?", g->pack->ver);
     namew = G.cols - 2 - 11 - (int)strlen(vers) - 1;
@@ -234,14 +260,25 @@ static Game *nth_shown(long n)
 static void set_summary(void)
 {
     Engine *e = G.e;
-    long marked = 0, i;
-    for (i = 0; i < e->n; i++)
-        marked += e->games[i]->marked;
+    long marked = 0, n = 0, upd = 0, chk = 0, miss = 0, i;
+    for (i = 0; i < e->n; i++) {          /* counted in the set the Set cycle picks */
+        const Game *g = e->games[i];
+        if (!in_set(g))
+            continue;
+        marked += g->marked;
+        if (g->status == M_MISSING)
+            miss++;
+        else {
+            n++;
+            upd += g->status == M_UPDATE;
+            chk += g->status == M_CHECK || g->status == M_NEWER;
+        }
+    }
     if (!e->n)
         snprintf(G.summary, sizeof(G.summary), "No games checked yet");
     else
-        snprintf(G.summary, sizeof(G.summary), "%ld games: %ld updates, %ld to check, %ld marked",
-                 e->n, e->st[M_UPDATE], e->st[M_CHECK] + e->st[M_NEWER], marked);
+        snprintf(G.summary, sizeof(G.summary), "%ld games: %ld updates, %ld to check, %ld missing, %ld marked",
+                 n, upd, chk, miss, marked);
     if (G.win && G.g[G_SUMMARY])
         GT_SetGadgetAttrs(G.g[G_SUMMARY], G.win, NULL, GTTX_Text, (ULONG)G.summary, TAG_END);
 }
@@ -267,7 +304,7 @@ static int make_gadgets(void)
     struct Window *w = G.win;
     int left = w->BorderLeft + M, right = w->Width - w->BorderRight - M;
     int top = w->BorderTop + 4, bottom = w->Height - w->BorderBottom - 4;
-    int h = bh(), lw, cw, y, bw, i, lvh;
+    int h = bh(), lw, cw, sw, y, bw, i, lvh;
     static const char *btn[] = {"Update marked", "Mark all", "Mark none", "Stop"};
 
     memset(G.g, 0, sizeof(G.g));
@@ -295,18 +332,25 @@ static int make_gadgets(void)
     ng.ng_Flags = PLACETEXT_IN;
     G.g[G_CHECK] = gad = CreateGadget(BUTTON_KIND, gad, &ng, GA_Disabled, G.busy, TAG_END);
 
-    /* Find [....] Show <cycle> */
+    /* Find [....] Set <cycle> Show <cycle> */
     y = top + h + GAP;
     lw = tlen("Drawers") + 8;                 /* lined up with the Drawers field */
     cw = tlen("No version") + 32;
+    sw = tlen("Games Beta") + 32;
     ng.ng_LeftEdge = left + lw;
     ng.ng_TopEdge = y;
-    ng.ng_Width = right - left - lw - GAP - (tlen("Show") + 8) - cw;
+    ng.ng_Width = right - left - lw - GAP - (tlen("Set") + 8) - sw - GAP - (tlen("Show") + 8) - cw;
     ng.ng_GadgetText = (UBYTE *)"Find";
     ng.ng_GadgetID = G_FIND;
     ng.ng_Flags = PLACETEXT_LEFT;
     G.g[G_FIND] = gad = CreateGadget(STRING_KIND, gad, &ng, GTST_String, (ULONG)G.find,
                                      GTST_MaxChars, sizeof(G.find) - 1, TAG_END);
+    ng.ng_LeftEdge = right - cw - GAP - (tlen("Show") + 8) - sw;
+    ng.ng_Width = sw;
+    ng.ng_GadgetText = (UBYTE *)"Set";
+    ng.ng_GadgetID = G_SET;
+    G.g[G_SET] = gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)set_labels,
+                                    GTCY_Active, G.set, GA_Disabled, G.busy, TAG_END);
     ng.ng_LeftEdge = right - cw;
     ng.ng_Width = cw;
     ng.ng_GadgetText = (UBYTE *)"Show";
@@ -485,6 +529,8 @@ static void do_check(void)
     set_summary();
     if (engine_dat(e, 0) == 0) {
         stopped = engine_scan_all(e, 3) == -2;
+        if (!stopped)
+            engine_missing(e);
         qsort(e->games, e->n, sizeof(Game *), cmp_games);
         if (stopped)
             say("Stopped: %ld games looked at", e->n);
@@ -797,6 +843,19 @@ int gui_main(struct Engine *e, const char *dirs)
                 case G_CHECK:
                     do_check();
                     break;
+                case G_SET:
+                    G.set = code;
+                    detach_list();
+                    G.top = 0;
+                    rebuild_list();
+                    set_summary();
+                    if (G.set && !((G.e->prefs.sets >> (G.set - 1)) & 1)) {
+                        char msg[120];
+                        snprintf(msg, sizeof(msg), "%s is off: turn it on in Settings > Pack sets, then Check",
+                                 set_labels[G.set]);
+                        gui_status(msg);
+                    }
+                    break;
                 case G_SHOW:
                     G.filter = code;
                     detach_list();
@@ -812,6 +871,7 @@ int gui_main(struct Engine *e, const char *dirs)
                         set_summary();
                     } else if (g) {
                         gui_status(g->status == M_CURRENT ? "That one is up to date" :
+                                   g->status == M_MISSING ? "Not on your drives: only in the pack list" :
                                    "No pack to update that one from");
                         rebuild_list();
                     }

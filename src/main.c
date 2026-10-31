@@ -37,7 +37,7 @@
 #include "engine.h"
 
 static const char verstag[] __attribute__((used)) =
-    "$VER: WHDUpdate " WHDU_VERSION " (30.10.2026) WHDLoad game updater";
+    "$VER: WHDUpdate " WHDU_VERSION " (31.10.2026) WHDLoad game updater";
 
 struct Library *SocketBase = NULL;
 struct Library *IconBase = NULL;

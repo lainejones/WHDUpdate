@@ -29,6 +29,23 @@ static unsigned char *load(const char *fn, long *len)
     return b;
 }
 
+static int n_missing;
+static const char *missing_files[64];
+static void on_missing(void *ctx, const Pack *p)
+{
+    (void)ctx;
+    if (n_missing < 64)
+        missing_files[n_missing++] = p->file;
+}
+static int missing_has(const char *file)
+{
+    int i;
+    for (i = 0; i < n_missing; i++)
+        if (!strcmp(missing_files[i], file))
+            return 1;
+    return 0;
+}
+
 static void units(void)
 {
     match_allowed = variants_default();
@@ -92,6 +109,8 @@ static void units(void)
         packs_add(&ix, "F", "F1WorldChampionshipEdition_v1.0_2061.lha", 1, 1);
         packs_add(&ix, "J", "Jet&HawaiianSceneryDisk_v1.0.lha", 1, 1);
         packs_add(&ix, "J", "Jet_v1.0.lha", 1, 1);
+        packs_add(&ix, "0", "4DSportsDriving&MasterTracks_v1.2_1461.lha", 1, 1);
+        packs_add(&ix, "0", "4DSportsDriving_v1.2_1461.lha", 1, 1);
         CHECK(packs_finish(&ix) == 0);
         memset(&si, 0, sizeof(si));
         strcpy(si.version, "1.0");
@@ -127,6 +146,24 @@ static void units(void)
         CHECK(m.status == M_NOMATCH);
         match_game(&ix, "Apache", "A.slave", &si, &m);
         CHECK(m.status == M_NOMATCH);
+        match_game(&ix, "4DSportsDriving&MstrTrcks", "4DSportsDriving.slave", &si, &m);
+        CHECK(!strcmp(m.newest->file, "4DSportsDriving&MasterTracks_v1.2_1461.lha"));
+        match_game(&ix, "4DSportsDriving", "4DSportsDriving.slave", &si, &m);
+        CHECK(!strcmp(m.newest->file, "4DSportsDriving_v1.2_1461.lha"));
+        {   /* the missing games: every base no installed game has, one per base
+             * (variants allowed only: no German 1869, no NTSC-only Hybris here) */
+            static const char *const present[] = {"1869", "aaargh", "alienbreed3d2"};
+            unsigned long keep = match_allowed;
+            match_allowed = variants_default() & ~0UL;
+            n_missing = 0;
+            packs_missing(&ix, present, 3, on_missing, NULL);
+            CHECK(n_missing > 5);
+            CHECK(missing_has("4DSportsDriving&MasterTracks_v1.2_1461.lha"));
+            CHECK(missing_has("Jet_v1.0.lha"));
+            CHECK(!missing_has("1869_v1.2.lha") && !missing_has("Aaargh!_v1.0a_0511.lha"));
+            CHECK(!missing_has("BuckRogers_v1.3_De_0445.lha"));      /* German only */
+            match_allowed = keep;
+        }
         match_game(&ix, "Jet&HawaiianScenery", "J.slave", &si, &m);
         CHECK(m.status != M_NOMATCH && !strcmp(m.newest->file, "Jet&HawaiianSceneryDisk_v1.0.lha"));
         match_game(&ix, "Corporation&Missions2Disk", "Corporation.slave", &si, &m);

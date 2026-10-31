@@ -45,6 +45,7 @@ typedef struct {
     int status;             /* M_... */
     char installed[16];
     const Pack *pack;       /* the newest fitting pack, or NULL */
+    int family;             /* FAM_... of the drawer it was found in, -1 = any */
     int marked;             /* picked for updating (window) */
     char label[100];
 } Game;
@@ -59,7 +60,8 @@ typedef struct Engine {
     char *pattern;          /* parsed GAME= pattern, or NULL */
     Game **games;
     long n, cap;
-    long st[6];             /* games per M_ status */
+    long st[M_COUNT];       /* games per M_ status */
+    int cur_family;         /* the family engine_scan() is looking through */
     /* called for every game found (the Shell prints them); may be NULL */
     void (*seen)(void *ctx, const Game *g);
     void *seen_ctx;
@@ -80,6 +82,9 @@ int  engine_scan(Engine *e, const char *root, int depth, int fam);
 /* engine_scan() for every drawer in the settings, each family against its
  * own sets. 0 = done, -2 = stopped. */
 int  engine_scan_all(Engine *e, int depth);
+/* After a scan: add an M_MISSING entry (path NULL) for every game of the sets
+ * in use that none of the games found is. */
+void engine_missing(Engine *e);
 
 /* Update one game; it then counts as current. 0 = updated, -1 = failed,
  * -2 = stopped. log = an open WHDUpdate.log or 0. */
