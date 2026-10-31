@@ -75,6 +75,14 @@ pause between them, to go easy on the server.
 Needs Kickstart 2.04 or newer, any 680x0, and a TCP/IP stack with
 `bsdsocket.library` (not for `OFFLINE`).
 
+## Installing
+
+Unpack the archive and double-click **Install_WHDUpdate** in the `WHDUpdate` drawer. It asks
+where the program's drawer should go (`SYS:Tools` unless you pick another), makes it with your
+Workbench's own drawer icon, and copies WHDUpdate, its icon, this README and the licence there.
+Running it again updates an installed copy; your settings are kept. WHDUpdate also runs
+straight from the unpacked drawer.
+
 ## Building
 
 In WSL with Bebbo's amiga-gcc on the PATH:

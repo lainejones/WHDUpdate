@@ -1,0 +1,51 @@
+; -------------------------------------------------------------------------
+; WHDUpdate - Installer script
+; Copies WHDUpdate, its icon, the README and the licence into a drawer of
+; your choice. Run it again to update; your settings (ENVARC:WHDUpdate.*)
+; are kept.
+; -------------------------------------------------------------------------
+(set @app-name "WHDUpdate")
+(complete 0)
+
+(if (not (exists "WHDUpdate"))
+    (abort "Can't find the WHDUpdate files next to this script.\n\n"
+           "Run the installer from the drawer it came in."))
+
+(message "WHDUpdate 0.6.1 - keeps your WHDLoad games up to date\n\n"
+         "WHDUpdate compares the games in your drawers with Retroplay's WHDLoad "
+         "packs and updates the ones that have a newer pack, on the Amiga itself. "
+         "It needs a TCP/IP stack (bsdsocket.library) to fetch the pack list.")
+
+(set target
+    (askdir (prompt "Where should the WHDUpdate drawer go?")
+            (help "A drawer called WHDUpdate is made here (or updated, if it is "
+                  "already there). It holds the program, the README and the licence.")
+            (default "SYS:Tools")))
+(set target (tackon target "WHDUpdate"))
+(complete 20)
+
+; the drawer gets this Workbench's own drawer icon (ENV:Sys/def_drawer.info)
+(if (not (exists target (noreq))) (makedir target (infos)))
+
+(copyfiles (prompt "Copying WHDUpdate")
+           (help @copyfiles-help)
+           (source "WHDUpdate")
+           (dest target)
+           (infos))
+(copyfiles (source "README.md") (dest target) (nogauge))
+(copyfiles (source "LICENSE") (dest target) (nogauge))
+(complete 90)
+
+; the package drawer came with a plain drawer icon so it shows when unpacked;
+; from now on it has this Workbench's own (ENV:Sys/def_drawer.info). Not at a
+; disk root: a disk root has no drawer icon, and it may be locked.
+(set pkgdir (expandpath ""))
+(if (and (exists "ENV:Sys/def_drawer.info" (noreq))
+         (<> (substr pkgdir (- (strlen pkgdir) 1) 1) ":"))
+    (if (exists (cat pkgdir ".info") (noreq))
+        (run (cat "Copy >NIL: ENV:Sys/def_drawer.info \"" pkgdir ".info\""))))
+(complete 100)
+
+(message "WHDUpdate 0.6.1 is installed in " target ".\n\n"
+         "Double-click its icon, type the drawers your games are in and press Check.")
+(exit (quiet))
