@@ -32,6 +32,17 @@ static int ends_with_nocase(const char *s, const char *tail)
     return 1;
 }
 
+static int eq_nocase(const char *a, const char *b)
+{
+    for (;; a++, b++) {
+        char x = *a, y = *b;
+        if (x >= 'A' && x <= 'Z') x = (char)(x | 32);
+        if (y >= 'A' && y <= 'Z') y = (char)(y | 32);
+        if (x != y || !x)
+            return x - y;
+    }
+}
+
 static int is_slave_name(const char *n)
 {
     return ends_with_nocase(n, ".slave") || ends_with_nocase(n, ".slav") || ends_with_nocase(n, ".sla");
@@ -76,6 +87,7 @@ static int walk(const char *dir, int depth, game_fn fn, void *ctx)
     struct FileInfoBlock *fib;
     char *subs = NULL, slave[108];
     long subslen = 0, subscap = 0;
+    GameFiles gf;
     int rc = 0;
 
     if (break_pressed())
@@ -89,13 +101,21 @@ static int walk(const char *dir, int depth, game_fn fn, void *ctx)
         return -1;
     }
     slave[0] = 0;
+    memset(&gf, 0, sizeof(gf));
+    gf.arc_size = -1;
     if (Examine(lock, fib) && fib->fib_DirEntryType > 0) {
         while (ExNext(lock, fib)) {
             const char *n = (const char *)fib->fib_FileName;
             if (fib->fib_DirEntryType < 0) {
                 /* the slave named like the drawer wins over the others */
-                if (is_slave_name(n) && (!slave[0] || same_nocase_prefix(n, leaf(dir))))
+                if (is_slave_name(n) && (!slave[0] || same_nocase_prefix(n, leaf(dir)))) {
                     strcpy(slave, n);
+                    gf.slave_size = fib->fib_Size;
+                    gf.slave_date = fib->fib_Date;
+                } else if (!eq_nocase(n, "ArchiveName.txt")) {
+                    gf.arc_size = fib->fib_Size;
+                    gf.arc_date = fib->fib_Date;
+                }
             } else if (fib->fib_DirEntryType == ST_USERDIR && depth > 0) {
                 long l = (long)strlen(n) + 1;
                 if (subslen + l + 1 > subscap) {
@@ -118,7 +138,7 @@ static int walk(const char *dir, int depth, game_fn fn, void *ctx)
     UnLock(lock);
 
     if (slave[0]) {
-        if (fn(ctx, dir, leaf(dir), slave))
+        if (fn(ctx, dir, leaf(dir), slave, &gf))
             rc = -2;
     } else if (subs) {
         char *path = (char *)malloc(PATHMAX), *s;

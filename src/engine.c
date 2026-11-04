@@ -174,6 +174,9 @@ int prefs_use(const Prefs *p)
 
 /* ---- the engine --------------------------------------------------------- */
 
+static void cache_save(Engine *e);
+static void cache_free(Engine *e);
+
 int engine_init(Engine *e)
 {
     memset(e, 0, sizeof(*e));
@@ -197,6 +200,8 @@ void engine_free(Engine *e)
     engine_clear(e);
     free(e->games);
     packs_free(&e->ix);
+    cache_save(e);
+    cache_free(e);
     free(e->slavebuf);
     free(e->pattern);
     memset(e, 0, sizeof(*e));
@@ -367,6 +372,252 @@ int engine_dat(Engine *e, int offline)
     return 0;
 }
 
+/* ---- the scan cache ------------------------------------------------- */
+
+/* Reading 2,600 slaves takes an A500 ten minutes, so what a scan read from
+ * a game drawer - the slave's facts and ArchiveName.txt's first line - is
+ * kept in PROGDIR:Cache/games.txt with the files' sizes and dates, and the
+ * next check reads a drawer again only when those changed. One line a
+ * drawer, tab-separated: path, slave, slave size, its date (3 numbers),
+ * parsed (0/1), ws_version, name, version, date, archive size (-1 = no
+ * file), its date (3 numbers), archive name. The pack matching is redone
+ * every time, so a new pack list needs no new scan. */
+#define SCANCACHE CACHEDIR "/games.txt"
+
+typedef struct {
+    char *path, *slave;
+    long size;
+    struct DateStamp ds;
+    int ok;
+    SlaveInfo si;
+    long asize;
+    struct DateStamp ads;
+    char arc[120];
+} CacheEntry;
+
+struct ScanCache {
+    CacheEntry *e;
+    long n, cap, sorted;    /* the first `sorted` entries are in path order */
+    int dirty;
+};
+
+/* Shell sort: no recursion (the library's qsort recurses once per entry on
+ * an ordered list, and this list comes back from the file in order - 2,600
+ * levels blew the 32 KB stack). */
+static void cache_sort(CacheEntry *e, long n)
+{
+    long gap, i, j;
+    for (gap = n / 2; gap > 0; gap /= 2)
+        for (i = gap; i < n; i++) {
+            CacheEntry t = e[i];
+            for (j = i; j >= gap && strcmp(e[j - gap].path, t.path) > 0; j -= gap)
+                e[j] = e[j - gap];
+            e[j] = t;
+        }
+}
+
+static CacheEntry *cache_search(CacheEntry *e, long n, const char *path)
+{
+    long lo = 0, hi = n - 1;
+    while (lo <= hi) {
+        long mid = (lo + hi) / 2;
+        int c = strcmp(e[mid].path, path);
+        if (!c)
+            return &e[mid];
+        if (c < 0)
+            lo = mid + 1;
+        else
+            hi = mid - 1;
+    }
+    return NULL;
+}
+
+static int same_date(const struct DateStamp *a, const struct DateStamp *b)
+{
+    return a->ds_Days == b->ds_Days && a->ds_Minute == b->ds_Minute && a->ds_Tick == b->ds_Tick;
+}
+
+/* The next tab-separated field of a line; the line is cut at the tab. */
+static char *field(char **p)
+{
+    char *s = *p, *t;
+    if (!s)
+        return NULL;
+    t = strchr(s, '\t');
+    if (t)
+        *t++ = 0;
+    *p = t;
+    return s;
+}
+
+static CacheEntry *cache_add(struct ScanCache *c)
+{
+    if (c->n == c->cap) {
+        long nc = c->cap ? c->cap * 2 : 1024;
+        CacheEntry *ne = (CacheEntry *)realloc(c->e, nc * sizeof(CacheEntry));
+        if (!ne)
+            return NULL;
+        c->e = ne;
+        c->cap = nc;
+    }
+    memset(&c->e[c->n], 0, sizeof(CacheEntry));
+    return &c->e[c->n++];
+}
+
+static void cache_load(Engine *e)
+{
+    struct ScanCache *c;
+    unsigned long len;
+    unsigned char *buf;
+    char *line, *next;
+
+    if (e->cache)
+        return;
+    c = e->cache = (struct ScanCache *)calloc(1, sizeof(*c));
+    if (!c)
+        return;
+    buf = load_file(SCANCACHE, &len, 2000000UL);
+    if (!buf)
+        return;
+    for (line = (char *)buf; line && *line; line = next) {
+        char *p = line, *f[16];
+        CacheEntry *ce;
+        int i;
+        next = strchr(line, '\n');
+        if (next)
+            *next++ = 0;
+        for (i = 0; i < 16; i++)
+            f[i] = field(&p);
+        if (!f[15] || !f[0][0] || !f[1][0])
+            continue;
+        ce = cache_add(c);
+        if (!ce)
+            break;
+        ce->path = strdup(f[0]);
+        ce->slave = strdup(f[1]);
+        ce->size = atol(f[2]);
+        ce->ds.ds_Days = atol(f[3]); ce->ds.ds_Minute = atol(f[4]); ce->ds.ds_Tick = atol(f[5]);
+        ce->ok = atoi(f[6]) != 0;
+        ce->si.ws_version = (unsigned short)atoi(f[7]);
+        set_str(ce->si.name, sizeof(ce->si.name), f[8]);
+        set_str(ce->si.version, sizeof(ce->si.version), f[9]);
+        set_str(ce->si.date, sizeof(ce->si.date), f[10]);
+        ce->asize = atol(f[11]);
+        ce->ads.ds_Days = atol(f[12]); ce->ads.ds_Minute = atol(f[13]); ce->ads.ds_Tick = atol(f[14]);
+        set_str(ce->arc, sizeof(ce->arc), f[15]);
+        if (!ce->path || !ce->slave) {
+            free(ce->path);
+            free(ce->slave);
+            c->n--;
+            break;
+        }
+    }
+    free(buf);
+    cache_sort(c->e, c->n);
+    c->sorted = c->n;
+}
+
+static void cache_save(Engine *e)
+{
+    struct ScanCache *c = e->cache;
+    BPTR fh;
+    long i;
+    if (!c || !c->dirty)
+        return;
+    c->dirty = 0;
+    {
+        BPTR l = CreateDir((STRPTR)CACHEDIR);
+        if (l)
+            UnLock(l);
+    }
+    fh = Open((STRPTR)SCANCACHE, MODE_NEWFILE);
+    if (!fh)
+        return;
+    for (i = 0; i < c->n; i++) {
+        const CacheEntry *ce = &c->e[i];
+        char line[1024];
+        int n = snprintf(line, sizeof(line), "%s\t%s\t%ld\t%ld\t%ld\t%ld\t%d\t%u\t%s\t%s\t%s\t%ld\t%ld\t%ld\t%ld\t%s\n",
+                         ce->path, ce->slave, ce->size, (long)ce->ds.ds_Days, (long)ce->ds.ds_Minute,
+                         (long)ce->ds.ds_Tick, ce->ok, (unsigned)ce->si.ws_version, ce->si.name,
+                         ce->si.version, ce->si.date, ce->asize, (long)ce->ads.ds_Days,
+                         (long)ce->ads.ds_Minute, (long)ce->ads.ds_Tick, ce->arc);
+        if (n <= 0 || n >= (int)sizeof(line))
+            continue;
+        if (Write(fh, line, n) != n)
+            break;
+    }
+    Close(fh);
+}
+
+static void cache_free(Engine *e)
+{
+    struct ScanCache *c = e->cache;
+    long i;
+    if (!c)
+        return;
+    for (i = 0; i < c->n; i++) {
+        free(c->e[i].path);
+        free(c->e[i].slave);
+    }
+    free(c->e);
+    free(c);
+    e->cache = NULL;
+}
+
+/* The entry for a drawer: the saved one when it is still right for these
+ * files, else NULL (and *slot = where the fresh facts go: the stale entry
+ * or a new one). */
+static CacheEntry *cache_find(Engine *e, const char *path, const char *slave,
+                              const GameFiles *gf, CacheEntry **slot)
+{
+    struct ScanCache *c = e->cache;
+    CacheEntry *ce = NULL;
+    *slot = NULL;
+    if (!c)
+        return NULL;
+    if (c->sorted)
+        ce = cache_search(c->e, c->sorted, path);
+    /* (a drawer added in this run is not looked for again: a scan visits
+     * each drawer once, and a second visit would only add a twin line) */
+    if (ce) {
+        *slot = ce;
+        if (!strcmp(ce->slave, slave) && ce->size == gf->slave_size && same_date(&ce->ds, &gf->slave_date) &&
+            ce->asize == gf->arc_size && (gf->arc_size < 0 || same_date(&ce->ads, &gf->arc_date)))
+            return ce;
+        return NULL;
+    }
+    ce = cache_add(c);
+    if (ce && !(ce->path = strdup(path))) {
+        c->n--;
+        ce = NULL;
+    }
+    *slot = ce;
+    return NULL;
+}
+
+/* Keep what was just read from the drawer. */
+static void cache_put(Engine *e, CacheEntry *ce, const char *slave, const GameFiles *gf,
+                      int ok, const SlaveInfo *si, const char *arc)
+{
+    char *sl;
+    if (!ce || !e->cache)
+        return;
+    sl = strdup(slave);
+    if (!sl)
+        return;
+    if (ce->slave)
+        free(ce->slave);
+    ce->slave = sl;
+    ce->size = gf->slave_size;
+    ce->ds = gf->slave_date;
+    ce->ok = ok;
+    ce->si = *si;
+    ce->asize = gf->arc_size;
+    ce->ads = gf->arc_date;
+    set_str(ce->arc, sizeof(ce->arc), arc ? arc : "");
+    e->cache->dirty = 1;
+}
+
 /* ---- the games ------------------------------------------------------ */
 
 static int read_slave(Engine *e, const char *path, const char *slave, SlaveInfo *si)
@@ -392,28 +643,38 @@ static int read_slave(Engine *e, const char *path, const char *slave, SlaveInfo 
 /* ArchiveName.txt in the drawer (written after an update here, or by
  * WHDFetch) names the pack installed: that beats the slave's version, which
  * can lack the pack's letter (2.1 for v2.1b). */
-static void installed_pack(Engine *e, const char *path, Match *m)
+static int read_archive_name(const char *path, char *name, int size)
 {
-    char full[600], name[200];
+    char full[600];
     BPTR fh;
     LONG n;
     int i, l = (int)strlen(path);
+    name[0] = 0;
     if (l + 20 > (int)sizeof(full))
-        return;
+        return 0;
     strcpy(full, path);
     if (l && path[l - 1] != ':' && path[l - 1] != '/')
         strcat(full, "/");
     strcat(full, "ArchiveName.txt");
     if (!(fh = Open((STRPTR)full, MODE_OLDFILE)))
-        return;
-    n = Read(fh, name, sizeof(name) - 1);
+        return 0;
+    n = Read(fh, name, size - 1);
     Close(fh);
     if (n <= 0)
-        return;
+        return 0;
     name[n] = 0;
     for (i = 0; name[i] && name[i] != '\n' && name[i] != '\r'; i++)
         ;
     name[i] = 0;
+    return 1;
+}
+
+/* name = the archive name the drawer carries (read, or from the cache). */
+static void installed_pack(Engine *e, const char *name, Match *m)
+{
+    int i;
+    if (!name[0])
+        return;
     if (m->newest && !strcmp(name, m->newest->file)) {
         m->status = M_CURRENT;                    /* the newest pack is what's there */
         strncpy(m->installed, m->newest->ver, sizeof(m->installed) - 1);
@@ -431,20 +692,35 @@ static void installed_pack(Engine *e, const char *path, Match *m)
         }
 }
 
-static int on_game(void *ctx, const char *path, const char *name, const char *slave)
+static int on_game(void *ctx, const char *path, const char *name, const char *slave, const GameFiles *gf)
 {
     Engine *e = (Engine *)ctx;
     SlaveInfo si;
     Match m;
     Game *g;
+    CacheEntry *ce, *slot;
+    char arc[120];
     long pl = (long)strlen(path);
 
     if (e->pattern && !MatchPatternNoCase((STRPTR)e->pattern, (STRPTR)name))
         return break_pressed();
-    if (!read_slave(e, path, slave, &si))
-        memset(&si, 0, sizeof(si));
+    ce = cache_find(e, path, slave, gf, &slot);
+    if (ce) {                                     /* the drawer as it was: no file to read */
+        if (ce->ok)
+            si = ce->si;
+        else
+            memset(&si, 0, sizeof(si));
+        set_str(arc, sizeof(arc), ce->arc);
+    } else {
+        int ok = read_slave(e, path, slave, &si);
+        if (!ok)
+            memset(&si, 0, sizeof(si));
+        if (gf->arc_size < 0 || !read_archive_name(path, arc, sizeof(arc)))
+            arc[0] = 0;
+        cache_put(e, slot, slave, gf, ok, &si, arc);
+    }
     match_game(&e->ix, name, slave, &si, &m);
-    installed_pack(e, path, &m);
+    installed_pack(e, arc, &m);
 
     if (e->n == e->cap) {
         long nc = e->cap ? e->cap * 2 : 512;
@@ -486,12 +762,14 @@ static unsigned long family_sets(const Engine *e, int fam)
 
 int engine_scan(Engine *e, const char *root, int depth, int fam)
 {
+    int rc;
     e->cur_family = fam;
     match_sets = family_sets(e, fam);
     match_allowed = e->prefs.allowed;
+    cache_load(e);
     if (!strcmp(root, "ALL") || !strcmp(root, "all")) {
         char *vols = volume_list(), *v, *w;
-        int rc = 0;
+        rc = 0;
         for (v = vols; v && *v && rc != -2; v += strlen(v) + 1) {
             for (w = vols; w < v && strcmp(w, v); w += strlen(w) + 1)
                 ;
@@ -501,9 +779,10 @@ int engine_scan(Engine *e, const char *root, int depth, int fam)
             rc = scan_tree(v, depth, on_game, e) == -2 ? -2 : 0;
         }
         free(vols);
-        return rc;
-    }
-    return scan_tree(root, depth, on_game, e);
+    } else
+        rc = scan_tree(root, depth, on_game, e);
+    cache_save(e);                            /* also after a stop: what was read stays read */
+    return rc;
 }
 
 int engine_scan_all(Engine *e, int depth)
@@ -593,9 +872,18 @@ static void on_missing(void *ctx, const Pack *p)
         free(g);
 }
 
-static int cmp_base(const void *a, const void *b)
+/* Shell sort of the base names: the library's qsort recurses once per entry
+ * on ordered input (see cache_sort). */
+static void sort_bases(const char **p, long n)
 {
-    return strcmp(*(const char *const *)a, *(const char *const *)b);
+    long gap, i, j;
+    for (gap = n / 2; gap > 0; gap /= 2)
+        for (i = gap; i < n; i++) {
+            const char *t = p[i];
+            for (j = i; j >= gap && strcmp(p[j - gap], t) > 0; j -= gap)
+                p[j] = p[j - gap];
+            p[j] = t;
+        }
 }
 
 void engine_missing(Engine *e)
@@ -610,7 +898,7 @@ void engine_missing(Engine *e)
     for (i = 0; i < have; i++)
         if (e->games[i]->pack)
             present[n++] = e->games[i]->pack->base;
-    qsort(present, n, sizeof(char *), cmp_base);
+    sort_bases(present, n);
     match_sets = e->dat_sets;
     match_allowed = e->prefs.allowed;
     packs_missing(&e->ix, present, n, on_missing, e);

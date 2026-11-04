@@ -238,50 +238,79 @@ static int cli(Engine *e, LONG *args)
 /* Started from Workbench, or by Run, a program gets the default 4 KB stack:
  * too little for the window plus the pack list decoder (it overran it and
  * hung on a 3.1 A1200). So it runs on its own 32 KB, through StackSwap() -
- * as PrismRTG's update tool does; across the swap only globals are used. */
+ * as PrismRTG's update tool does; across the swap only globals are used.
+ * The swapped function must take NO arguments: gcc pushes arguments on the
+ * new stack and, with its deferred pops, takes them off again only after the
+ * swap back - on the old stack, which is then four bytes short, and the
+ * program returns to its caller with every saved register wrong (the
+ * machine died at exit on the A500; 0.6.x, found 2026-11-03). */
+
+/* WHDU_TRACE builds write progress marks to T:whd.trace through dos.library
+ * alone (open, write, close each time), to place a crash that stdio cannot
+ * report. */
+#ifdef WHDU_TRACE
+static void tmark(const char *m)
+{
+    BPTR f = Open((STRPTR)"T:whd.trace", MODE_READWRITE);
+    if (f) {
+        Seek(f, 0, OFFSET_END);
+        Write(f, (APTR)m, strlen(m));
+        Write(f, (APTR)"\n", 1);
+        Close(f);
+    }
+}
+#define TMARK(m) tmark(m)
+#else
+#define TMARK(m)
+#endif
 #define NEED_STACK 32768UL
 static struct StackSwapStruct swap;
 static APTR swapMem;
 static int swapRc, g_argc;
 static char **g_argv;
 
-static int whdu_main(int argc, char **argv);
+static int whdu_main(void);
 
 int main(int argc, char **argv)
 {
     struct Task *me = FindTask(NULL);
+    TMARK("main");
+    g_argc = argc;
+    g_argv = argv;
     if ((ULONG)me->tc_SPUpper - (ULONG)me->tc_SPLower >= NEED_STACK - 4096)
-        return whdu_main(argc, argv);
+        return whdu_main();
     if (!(swapMem = AllocVec(NEED_STACK, MEMF_ANY))) {
         printf("WHDUpdate: not enough memory for its stack\n");
         return RETURN_FAIL;
     }
-    g_argc = argc;
-    g_argv = argv;
     swap.stk_Lower = swapMem;
     swap.stk_Upper = (ULONG)swapMem + NEED_STACK;
     swap.stk_Pointer = (APTR)swap.stk_Upper;
     StackSwap(&swap);
-    swapRc = whdu_main(g_argc, g_argv);
+    swapRc = whdu_main();
     StackSwap(&swap);
+    TMARK("swapped back");
     FreeVec(swapMem);
+    TMARK("stack freed, returning");
     return swapRc;
 }
 
-static int whdu_main(int argc, char **argv)
+static int whdu_main(void)
 {
     LONG args[A_COUNT] = {0};
     struct RDArgs *rda = NULL;
     Engine e;
-    int rc;
+    int rc, argc = g_argc;
 
-    (void)argv;
+    TMARK("whdu_main");
     if (engine_init(&e)) {
         printf("WHDUpdate: out of memory\n");
         return RETURN_FAIL;
     }
+    TMARK("engine_init done");
     if (argc) {                           /* from a Shell */
         rda = ReadArgs((STRPTR)TEMPLATE, args, NULL);
+        TMARK("ReadArgs done");
         if (!rda) {
             PrintFault(IoErr(), (STRPTR)"WHDUpdate");
             engine_free(&e);
@@ -293,8 +322,11 @@ static int whdu_main(int argc, char **argv)
                    "  WHDUpdate Games:  [UPDATE [YES]] [GAME=pattern] [SHOWALL] [REPORT=file]\n"
                    "                    [OFFLINE] [FTP] [DEPTH=n]\n"
                    "  WHDUpdate GUI     the window (also from the icon)\n");
+            TMARK("usage printed");
             FreeArgs(rda);
+            TMARK("FreeArgs done");
             engine_free(&e);
+            TMARK("engine_free done");
             return RETURN_WARN;
         }
         if (args[A_GAME]) {
@@ -335,7 +367,9 @@ static int whdu_main(int argc, char **argv)
         rc = cli(&e, args);
     }
 
+    TMARK("run done");
     engine_free(&e);
+    TMARK("engine_free done");
     if (IconBase)
         CloseLibrary(IconBase);
     if (SocketBase)

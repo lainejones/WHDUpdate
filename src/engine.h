@@ -57,6 +57,7 @@ typedef struct Engine {
     unsigned long dat_sets;  /* the sets ix holds */
     char datdate[16];        /* the newest of their dates */
     unsigned char *slavebuf;
+    struct ScanCache *cache; /* what earlier scans read from the drawers (engine.c) */
     char *pattern;          /* parsed GAME= pattern, or NULL */
     Game **games;
     long n, cap;

@@ -893,6 +893,12 @@ int gui_main(struct Engine *e, const char *dirs)
     }
 
 done:
+    /* the Drawers field is kept even when Check was never pressed */
+    if (G.win && G.g[G_DIRS]) {
+        strcpy(G.dirs, (char *)((struct StringInfo *)G.g[G_DIRS]->SpecialInfo)->Buffer);
+        if (strcmp(G.dirs, G.e->prefs.dirs[FAM_GAMES]))
+            save_dirs();
+    }
     if (G.win) {
         detach_list();
         if (G.menu)

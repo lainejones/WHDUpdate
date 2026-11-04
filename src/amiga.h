@@ -34,10 +34,20 @@ void url_decode(const char *in, char *out, int size);
 
 /* scan.c -------------------------------------------------------------- */
 
-/* Called for each game drawer: its full path, its name and its slave's
- * file name. Return nonzero to stop the scan. */
+/* What the directory listing said about the files the engine would read:
+ * the slave, and ArchiveName.txt if there is one (arc_size -1 = none). With
+ * these the scan cache can tell an unchanged drawer without opening a file. */
+typedef struct {
+    long slave_size;
+    struct DateStamp slave_date;
+    long arc_size;
+    struct DateStamp arc_date;
+} GameFiles;
+
+/* Called for each game drawer: its full path, its name, its slave's file
+ * name and the files' sizes and dates. Return nonzero to stop the scan. */
 typedef int (*game_fn)(void *ctx, const char *path, const char *name,
-                       const char *slave);
+                       const char *slave, const GameFiles *files);
 
 /* Look through root (and its drawers, down to depth levels) for game
  * drawers: drawers with a WHDLoad slave in them. 0 = done, -1 = root not
