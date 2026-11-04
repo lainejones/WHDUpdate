@@ -17,4 +17,9 @@ typedef struct {
  * nothing changed, -2 = stopped by Ctrl-C (nothing changed). */
 int update_game(const UpdateConf *c, const char *path, const Pack *p, const char *installed);
 
+/* Remove the game in drawer path and its icon: deleted for good, or (keep)
+ * moved to <volume>:WHDUpdate-Old/ like an updated game's old copy.
+ * 0 = done, -1 = failed (said why). */
+int remove_game(BPTR log, const char *path, int keep);
+
 #endif

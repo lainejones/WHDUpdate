@@ -55,6 +55,11 @@ extern unsigned long match_allowed;
  * drawers against the games sets, demo drawers against the demo sets. */
 extern unsigned long match_sets;
 unsigned long variants_default(void);            /* English; AGA, ECS, OCS, NTSC, PAL */
+/* Is a pack with these variant words one the settings turn off (allowed =
+ * the Languages and Systems pages)? Its languages are a choice - an En+De
+ * pack is wanted while English is on - its systems are all needed - an
+ * AGA+NTSC pack is not wanted while AGA is off. */
+int variants_unwanted(unsigned long vbits, unsigned long allowed);
 
 void packs_init(PackIndex *ix);
 int  packs_add(PackIndex *ix, const char *folder, const char *file,

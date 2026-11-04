@@ -50,17 +50,20 @@ enum { G_DIRS, G_CHECK, G_FIND, G_SUMMARY, G_SET, G_SHOW, G_LIST, G_UPDATE, G_MA
        G_STOP, G_STATUS, G_COUNT };
 
 static const char *show_labels[] = {"Updates", "All games", "To check", "Not found", "No version",
-                                    "Missing", NULL};
+                                    "Missing", "Not wanted", NULL};
+#define SHOW_UNWANTED 6           /* games of a language or system turned off: to remove */
 /* which pack set the list shows: 0 = all of them, else pack_sets[n - 1] */
 static const char *set_labels[] = {"All sets", "Games", "Games Beta", "Demos", "Demos Beta",
                                    "Magazines", NULL};
 
-enum { MN_CHECK = 1, MN_UPDATE, MN_ABOUT, MN_QUIT, MN_SERVER, MN_SETS, MN_LANG, MN_SYS, MN_FTPONLY };
+enum { MN_CHECK = 1, MN_UPDATE, MN_ABOUT, MN_QUIT, MN_SERVER, MN_SETS, MN_LANG, MN_SYS, MN_FTPONLY,
+       MN_REMOVE };
 
 static struct NewMenu menu_def[] = {
     {NM_TITLE, (STRPTR)"Project", NULL, 0, 0, NULL},
     {NM_ITEM, (STRPTR)"Check", (STRPTR)"C", 0, 0, (APTR)MN_CHECK},
     {NM_ITEM, (STRPTR)"Update marked", (STRPTR)"U", 0, 0, (APTR)MN_UPDATE},
+    {NM_ITEM, (STRPTR)"Remove marked...", (STRPTR)"R", 0, 0, (APTR)MN_REMOVE},
     {NM_ITEM, NM_BARLABEL, NULL, 0, 0, NULL},
     {NM_ITEM, (STRPTR)"About...", NULL, 0, 0, (APTR)MN_ABOUT},
     {NM_ITEM, NM_BARLABEL, NULL, 0, 0, NULL},
@@ -166,13 +169,23 @@ static int shown(const Game *g)
     case 3: return g->status == M_NOMATCH;
     case 4: return g->status == M_UNKNOWN;
     case 5: return 0;
+    case SHOW_UNWANTED: return engine_unwanted(G.e, g);
     default: return 1;
     }
 }
 
+/* Not wanted lists the games to remove: any of them can be marked there,
+ * and its marks are apart from the update marks. */
 static int markable(const Game *g)
 {
+    if (G.filter == SHOW_UNWANTED)
+        return g->path != NULL;
     return g->pack && (g->status == M_UPDATE || g->status == M_CHECK);
+}
+
+static int is_marked(const Game *g)
+{
+    return G.filter == SHOW_UNWANTED ? g->doomed : g->marked;
 }
 
 static void make_label(Game *g)
@@ -190,7 +203,7 @@ static void make_label(Game *g)
     namew = G.cols - 2 - 11 - (int)strlen(vers) - 1;
     if (namew < 8)
         namew = 8;
-    snprintf(g->label, sizeof(g->label), "%c %-10s %-*.*s %s", g->marked ? '*' : ' ',
+    snprintf(g->label, sizeof(g->label), "%c %-10s %-*.*s %s", is_marked(g) ? '*' : ' ',
              words[g->status], namew, namew, g->name, vers);
     g->node.ln_Name = g->label;
 }
@@ -260,12 +273,14 @@ static Game *nth_shown(long n)
 static void set_summary(void)
 {
     Engine *e = G.e;
-    long marked = 0, n = 0, upd = 0, chk = 0, miss = 0, i;
+    long marked = 0, n = 0, upd = 0, chk = 0, miss = 0, unw = 0, doomed = 0, i;
     for (i = 0; i < e->n; i++) {          /* counted in the set the Set cycle picks */
         const Game *g = e->games[i];
         if (!in_set(g))
             continue;
         marked += g->marked;
+        doomed += g->doomed;
+        unw += engine_unwanted(e, g);
         if (g->status == M_MISSING)
             miss++;
         else {
@@ -276,6 +291,9 @@ static void set_summary(void)
     }
     if (!e->n)
         snprintf(G.summary, sizeof(G.summary), "No games checked yet");
+    else if (G.filter == SHOW_UNWANTED)
+        snprintf(G.summary, sizeof(G.summary), "%ld of %ld games not wanted, %ld marked to remove",
+                 unw, n, doomed);
     else
         snprintf(G.summary, sizeof(G.summary), "%ld games: %ld updates, %ld to check, %ld missing, %ld marked",
                  n, upd, chk, miss, marked);
@@ -306,6 +324,7 @@ static int make_gadgets(void)
     int top = w->BorderTop + 4, bottom = w->Height - w->BorderBottom - 4;
     int h = bh(), lw, cw, sw, y, bw, i, lvh;
     static const char *btn[] = {"Update marked", "Mark all", "Mark none", "Stop"};
+    btn[0] = G.filter == SHOW_UNWANTED ? "Remove marked" : "Update marked";
 
     memset(G.g, 0, sizeof(G.g));
     gad = CreateContext(&G.glist);
@@ -593,14 +612,76 @@ static void do_update(void)
         G.stop ? " (stopped), " : ", ", failed, LOGFILE);
 }
 
+/* Remove the games marked under Not wanted: deleted, or moved to
+ * WHDUpdate-Old (a Rename, so it is quick, but frees no room until that
+ * drawer is emptied). */
+static void do_remove(void)
+{
+    Engine *e = G.e;
+    struct EasyStruct es;
+    char body[300];
+    long i, n = 0, k = 0, done = 0, failed = 0;
+    LONG how;
+    BPTR log;
+
+    for (i = 0; i < e->n; i++)
+        n += e->games[i]->doomed;
+    if (!n) {
+        gui_status("Show Not wanted, mark the games to remove there, then Remove marked");
+        return;
+    }
+    snprintf(body, sizeof(body), "Remove %ld game%s?\n\nDelete: the drawers and their icons are\n"
+             "deleted for good.\nMove: they go to WHDUpdate-Old on the same\n"
+             "volume, to delete when you are sure.", n, n == 1 ? "" : "s");
+    memset(&es, 0, sizeof(es));
+    es.es_StructSize = sizeof(es);
+    es.es_Title = (UBYTE *)"WHDUpdate";
+    es.es_TextFormat = (UBYTE *)body;
+    es.es_GadgetFormat = (UBYTE *)"Delete|Move|Cancel";
+    if (!(how = EasyRequestArgs(G.win, &es, NULL, NULL)))
+        return;
+    set_busy(1);
+    detach_list();
+    new_list(&G.list);            /* games leave the list as they go */
+    G.sel = NULL;
+    log = engine_open_log();
+    for (i = 0; i < e->n && !gui_poll(); ) {
+        Game *g = e->games[i];
+        if (!g->doomed) {
+            i++;
+            continue;
+        }
+        say("(%ld/%ld) %s %s", ++k, n, how == 1 ? "Deleting" : "Moving", g->name);
+        if (engine_remove(e, i, how == 2, log) == 0)
+            done++;                   /* the next game is at i now */
+        else {
+            g->doomed = 0;
+            failed++;
+            i++;
+        }
+    }
+    if (log)
+        Close(log);
+    set_busy(0);
+    rebuild_list();
+    set_summary();
+    say("%ld %s%s%ld failed. Log: %s", done, how == 1 ? "deleted" : "moved to WHDUpdate-Old",
+        G.stop ? " (stopped), " : ", ", failed, LOGFILE);
+}
+
 /* Mark all / Mark none: only the games the list shows (Find and Show), so a
- * search picks the ones to update; games marked earlier stay marked. */
+ * search picks the ones to update (or, under Not wanted, to remove); games
+ * marked earlier stay marked. */
 static void mark_all(int on)
 {
     long i;
     for (i = 0; i < G.e->n; i++) {
         Game *g = G.e->games[i];
-        if (shown(g))
+        if (!shown(g))
+            continue;
+        if (G.filter == SHOW_UNWANTED)
+            g->doomed = on;
+        else
             g->marked = on && g->status == M_UPDATE;
     }
     rebuild_list();
@@ -732,6 +813,7 @@ static void do_menu(ULONG id, struct MenuItem *it)
     switch (id) {
     case MN_CHECK:  do_check(); break;
     case MN_UPDATE: do_update(); break;
+    case MN_REMOVE: do_remove(); break;
     case MN_ABOUT:  about(); break;
     case MN_QUIT:   G.quit = 1; break;
     case MN_FTPONLY:
@@ -856,17 +938,28 @@ int gui_main(struct Engine *e, const char *dirs)
                         gui_status(msg);
                     }
                     break;
-                case G_SHOW:
+                case G_SHOW: {
+                    int was = G.filter == SHOW_UNWANTED;
                     G.filter = code;
                     detach_list();
                     G.top = 0;                /* another list: from its top */
-                    rebuild_list();
+                    if (was != (G.filter == SHOW_UNWANTED))
+                        relayout();           /* Update marked <-> Remove marked */
+                    else
+                        rebuild_list();
+                    set_summary();
+                    if (G.filter == SHOW_UNWANTED)
+                        gui_status("Games of a language or system turned off in Settings: mark, then Remove");
                     break;
+                }
                 case G_LIST: {
                     Game *g = nth_shown(code);
                     G.sel = g;                /* stays highlighted, marked or not */
                     if (g && markable(g)) {
-                        g->marked = !g->marked;
+                        if (G.filter == SHOW_UNWANTED)
+                            g->doomed = !g->doomed;
+                        else
+                            g->marked = !g->marked;
                         rebuild_list();
                         set_summary();
                     } else if (g) {
@@ -878,7 +971,10 @@ int gui_main(struct Engine *e, const char *dirs)
                     break;
                 }
                 case G_UPDATE:
-                    do_update();
+                    if (G.filter == SHOW_UNWANTED)
+                        do_remove();
+                    else
+                        do_update();
                     break;
                 case G_MARKALL:
                     mark_all(1);

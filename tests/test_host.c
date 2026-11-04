@@ -132,6 +132,24 @@ static void units(void)
         CHECK(m.how == HOW_PREFIX && m.status == M_UPDATE);
         match_game(&ix, "BuckRogersDe", "BuckRogers.slave", &si, &m);
         CHECK(m.status == M_UPDATE);
+        {   /* Not wanted, on an ECS machine: the default without AGA */
+            unsigned long aga = 0, ecs;
+            int k;
+            for (k = 0; variant_words[k].word; k++)
+                if (!strcmp(variant_words[k].word, "aga"))
+                    aga = 1UL << k;
+            ecs = variants_default() & ~aga;
+            CHECK(variants_unwanted(m.newest->vbits, ecs));          /* BuckRogers De */
+            match_game(&ix, "1869AGA", "1869.slave", &si, &m);
+            CHECK(variants_unwanted(m.newest->vbits, ecs));
+            CHECK(!variants_unwanted(m.newest->vbits, variants_default()));
+            match_game(&ix, "1869", "1869.slave", &si, &m);
+            CHECK(!variants_unwanted(m.newest->vbits, ecs));
+            match_game(&ix, "Hybris", "Hybris.slave", &si, &m);
+            CHECK(!variants_unwanted(m.newest->vbits, ecs));         /* NTSC is on */
+            match_game(&ix, "Lemmings2", "L2.slave", &si, &m);       /* 1MB_NTSC: 1MB is no variant word */
+            CHECK(m.newest && !variants_unwanted(m.newest->vbits, ecs));
+        }
         match_game(&ix, "ConquestsOfTheLongbow", "C.slave", &si, &m);
         CHECK(m.status == M_UPDATE && !strcmp(m.newest->ver, "1.1"));
         match_game(&ix, "Bubble&Squeak", "B.slave", &si, &m);

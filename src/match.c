@@ -66,6 +66,22 @@ unsigned long variants_default(void)
     return bits;
 }
 
+int variants_unwanted(unsigned long vbits, unsigned long allowed)
+{
+    unsigned long lang = 0, multi = 0;
+    int i;
+    for (i = 0; variant_words[i].word; i++)
+        if (!variant_words[i].system) {
+            lang |= 1UL << i;
+            if (!strcmp(variant_words[i].word, "multi"))
+                multi = 1UL << i;
+        }
+    /* a multi-language pack has yours among them, as a rule */
+    if ((vbits & lang) && !(vbits & multi) && !(vbits & lang & allowed))
+        return 1;
+    return (vbits & ~lang & ~allowed) != 0;
+}
+
 unsigned long match_allowed = 0xffffffffUL;   /* set from the settings (engine.c) */
 unsigned long match_sets = 0xffffffffUL;
 

@@ -549,8 +549,8 @@ static void cache_save(Engine *e)
                          ce->si.version, ce->si.date, ce->asize, (long)ce->ads.ds_Days,
                          (long)ce->ads.ds_Minute, (long)ce->ads.ds_Tick, ce->arc,
                          (long)ce->dd.ds_Days, (long)ce->dd.ds_Minute, (long)ce->dd.ds_Tick);
-        if (n <= 0 || n >= (int)sizeof(line))
-            continue;
+        if (!ce->slave[0] || n <= 0 || n >= (int)sizeof(line))
+            continue;                         /* no slave: a removed game */
         if (Write(fh, line, n) != n)
             break;
     }
@@ -985,4 +985,35 @@ int engine_update(Engine *e, Game *g, BPTR log)
         g->marked = 0;
     }
     return rc;
+}
+
+int engine_unwanted(const Engine *e, const Game *g)
+{
+    return g->path && g->pack && variants_unwanted(g->pack->vbits, e->prefs.allowed);
+}
+
+int engine_remove(Engine *e, long i, int keep, BPTR log)
+{
+    Game *g = e->games[i];
+    struct ScanCache *c = e->cache;
+    CacheEntry *ce = NULL;
+    long k;
+
+    if (!g->path || remove_game(log, g->path, keep))
+        return -1;
+    if (c) {                                  /* not read again from the cache */
+        ce = cache_search(c->e, c->sorted, g->path);
+        for (k = c->sorted; !ce && k < c->n; k++)
+            if (!strcmp(c->e[k].path, g->path))
+                ce = &c->e[k];
+        if (ce) {                             /* saved by the next scan or at the end */
+            ce->slave[0] = 0;
+            c->dirty = 1;
+        }
+    }
+    e->st[g->status]--;
+    memmove(&e->games[i], &e->games[i + 1], (e->n - i - 1) * sizeof(Game *));
+    e->n--;
+    free(g);
+    return 0;
 }

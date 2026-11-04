@@ -47,6 +47,7 @@ typedef struct {
     const Pack *pack;       /* the newest fitting pack, or NULL */
     int family;             /* FAM_... of the drawer it was found in, -1 = any */
     int marked;             /* picked for updating (window) */
+    int doomed;             /* picked for removing (window) */
     char label[100];
 } Game;
 
@@ -91,6 +92,13 @@ void engine_missing(Engine *e);
  * -2 = stopped. log = an open WHDUpdate.log or 0. */
 int  engine_update(Engine *e, Game *g, BPTR log);
 BPTR engine_open_log(void);
+
+/* Is g installed from a pack whose language or system the settings turn off? */
+int  engine_unwanted(const Engine *e, const Game *g);
+/* Delete game i's drawer and icon, or (keep) move them to WHDUpdate-Old;
+ * then it leaves the list and the scan cache (and is freed). 0 = removed,
+ * -1 = failed. */
+int  engine_remove(Engine *e, long i, int keep, BPTR log);
 
 #define LOGFILE "PROGDIR:WHDUpdate.log"
 

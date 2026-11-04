@@ -23,13 +23,31 @@ Double-click the icon (or `WHDUpdate GUI` in a Shell): type the drawers your gam
 in - several with `;` between them, or `ALL` - and press **Check**. Type part of a name in **Find** and
 the list shows only those games. Click a game to mark it (`*`) - the game you clicked
 stays highlighted - or **Mark all** (the games the list shows), then **Update marked**. **Show** picks what the list shows:
-the updates, all games, the ones to check by hand, the ones not found, or the ones whose
-slave has no version. **Stop** ends a check or the updates between two steps. The drawers
+the updates, all games, the ones to check by hand, the ones not found, the ones whose
+slave has no version, the packs you don't have (**Missing**), or the games you don't
+want (**Not wanted**, see below). **Stop** ends a check or the updates between two steps. The drawers
 are remembered (in `ENVARC:WHDUpdate.prefs` with the other settings, saved when
 you press Check and when the window closes), and the next start checks right away.
 What a check read from each game drawer is kept in `PROGDIR:Cache/games.txt` with the
 drawer's date, so the next check looks inside a drawer again only when something in it
 was added, replaced or removed.
+
+### Removing games you don't want
+
+**Show Not wanted** lists the installed games whose pack is of a language or a system
+that is turned off in **Settings > Languages** and **Settings > Systems**: the AGA games
+on an ECS machine once AGA is off, the German and French versions when only English is
+on, the CD32 versions, and so on. A pack in several languages is wanted while one of them
+is on; a pack for several systems (AGA and NTSC) is not wanted when any of them is off.
+Click the games to remove, or **Mark all**, then **Remove marked** (also in the Project
+menu). It asks first, and offers two ways:
+
+- **Delete**: the game drawers and their icons are deleted for good.
+- **Move**: they go to `<volume>:WHDUpdate-Old/`, like an updated game's old copy. That is
+  quick, but frees no room until you delete them from there.
+
+Each removal is written to `PROGDIR:WHDUpdate.log`. The marks under Not wanted are kept
+apart from the update marks, so marking games to update never removes them.
 
 The window is laid out from the screen font and fits a 640x200 NTSC screen with Topaz 8;
 when the screen font is too big for the screen, it uses Topaz 8. The list always uses the

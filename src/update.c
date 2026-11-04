@@ -514,6 +514,60 @@ static void log_line(const UpdateConf *c, const char *s)
     FPuts(c->log, (STRPTR)line);
 }
 
+/* Where the old copy of path goes in olddir: WHDUpdate-Old/<name>, or
+ * <name>.2, .3 ... when an older copy is there already. */
+static void backup_name(const char *olddir, const char *path, char *backup)
+{
+    int i;
+    cat_path(backup, olddir, leaf_of(path));
+    for (i = 2; exists(backup) && i < 100; i++)
+        snprintf(backup + strlen(olddir) + 1, P - strlen(olddir) - 1, "%s.%d", leaf_of(path), i);
+}
+
+int remove_game(BPTR log, const char *path, int keep)
+{
+    UpdateConf c;
+    char vol[P], olddir[P], backup[P], info[P], backinfo[P], msg[P * 2 + 40];
+    const char *colon = strchr(path, ':');
+
+    memset(&c, 0, sizeof(c));
+    c.log = log;
+    if (!colon || !colon[1] || strlen(path) > P - 40)
+        return -1;                             /* never a whole volume */
+    snprintf(info, sizeof(info), "%s.info", path);
+    if (keep) {
+        memcpy(vol, path, colon + 1 - path);
+        vol[colon + 1 - path] = 0;
+        cat_path(olddir, vol, OLDDIR);
+        if (!make_dir(olddir)) {
+            say("  cannot make %s", olddir);
+            return -1;
+        }
+        backup_name(olddir, path, backup);
+        snprintf(backinfo, sizeof(backinfo), "%s.info", backup);
+        if (!Rename((STRPTR)path, (STRPTR)backup)) {
+            say("  cannot move %s (in use?)", path);
+            return -1;
+        }
+        if (exists(info))
+            Rename((STRPTR)info, (STRPTR)backinfo);
+        snprintf(msg, sizeof(msg), "removed %s, moved to %s", path, backup);
+    } else {
+        delete_tree(path);
+        if (exists(path)) {
+            say("  could not delete all of %s (in use or protected?)", path);
+            snprintf(msg, sizeof(msg), "FAILED to delete all of %s", path);
+            log_line(&c, msg);
+            return -1;
+        }
+        if (exists(info))
+            DeleteFile((STRPTR)info);
+        snprintf(msg, sizeof(msg), "deleted %s", path);
+    }
+    log_line(&c, msg);
+    return 0;
+}
+
 int update_game(const UpdateConf *c, const char *path, const Pack *p, const char *installed)
 {
     char vol[P], olddir[P], work[P], pack[P], unp[P], newname[108], newdir[P], newinfo[P];
@@ -521,7 +575,7 @@ int update_game(const UpdateConf *c, const char *path, const Pack *p, const char
     const char *colon = strchr(path, ':');
     unsigned long got = 0, crc = 0;
     BPTR fh;
-    int rc, i, kept;
+    int rc, kept;
 
     if (!colon || strlen(path) > P - 40)
         return -1;
@@ -600,9 +654,7 @@ int update_game(const UpdateConf *c, const char *path, const Pack *p, const char
     }
 
     /* 5. swap: old -> WHDUpdate-Old/<name>[.n], new -> the old place */
-    cat_path(backup, olddir, leaf_of(path));
-    for (i = 2; exists(backup) && i < 100; i++)
-        snprintf(backup + strlen(olddir) + 1, P - strlen(olddir) - 1, "%s.%d", leaf_of(path), i);
+    backup_name(olddir, path, backup);
     snprintf(oldinfo, sizeof(oldinfo), "%s.info", path);
     snprintf(backinfo, sizeof(backinfo), "%s.info", backup);
     if (!Rename((STRPTR)path, (STRPTR)backup)) {
