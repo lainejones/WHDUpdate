@@ -46,10 +46,29 @@ typedef struct {
     char installed[16];
     const Pack *pack;       /* the newest fitting pack, or NULL */
     int family;             /* FAM_... of the drawer it was found in, -1 = any */
-    int marked;             /* picked for updating (window) */
+    int marked;             /* picked for updating, or under Missing for installing (window) */
     int doomed;             /* picked for removing (window) */
+    /* what its slave asks of the machine (all 0 when it couldn't be read) */
+    unsigned short wsver, wsflags;
+    unsigned long basemem;
+    long expmem;
+    char kick[48];
+    unsigned short kickcrc[4];
+    int saves;              /* save and high score files in the drawer, -1 = not counted */
+    long dupe;              /* 1.. = the group of copies of one game it is in, 0 = none */
     char label[100];
 } Game;
+
+/* The machine WHDUpdate runs on, for Won't run here (engine_machine). */
+typedef struct {
+    unsigned long chip, fast;   /* total memory */
+    int cpu020;                 /* a 68020 or better */
+    int aga;                    /* the AGA chipset */
+    int whdload;                /* C:WHDLoad's version, 0 = not found */
+} Machine;
+
+/* Why a game won't run here (engine_cantrun) */
+enum { CANT_CHIP = 1, CANT_MEM = 2, CANT_CPU = 4, CANT_AGA = 8, CANT_KICK = 16, CANT_WHDL = 32 };
 
 typedef struct Engine {
     Prefs prefs;
@@ -64,6 +83,10 @@ typedef struct Engine {
     long n, cap;
     long st[M_COUNT];       /* games per M_ status */
     int cur_family;         /* the family engine_scan() is looking through */
+    Machine mach;
+    int mach_known;
+    Game **dupord;          /* the games with a twin, a group after the other (engine_dupes) */
+    long ndup;
     /* called for every game found (the Shell prints them); may be NULL */
     void (*seen)(void *ctx, const Game *g);
     void *seen_ctx;
@@ -99,6 +122,45 @@ int  engine_unwanted(const Engine *e, const Game *g);
  * then it leaves the list and the scan cache (and is freed). 0 = removed,
  * -1 = failed. */
 int  engine_remove(Engine *e, long i, int keep, BPTR log);
+
+/* What this machine has (memory, CPU, chipset, WHDLoad); read once. */
+void engine_machine(Engine *e);
+/* The reasons (CANT_...) g won't run on this machine, 0 = none or not
+ * known; why = a few words for each ("AGA, 2 MB chip"), may be NULL. A
+ * missing Kickstart image (DEVS:Kickstarts/kick<name>) and an old WHDLoad can be put
+ * right; the others are the machine's. */
+int  engine_cantrun(Engine *e, const Game *g, char *why, int size);
+/* Find the games installed more than once (the same drawer name in two
+ * places): their dupe numbers and e->dupord. How many games. */
+long engine_dupes(Engine *e);
+/* Count g's save and high score files (g->saves). */
+void engine_count_saves(Game *g);
+/* The games want() picks (NULL: all), as CSV with a header line. 0 = written. */
+int  engine_export(Engine *e, BPTR fh, int (*want)(const Game *g));
+/* Install missing game i (M_MISSING) into drawer dest - into its letter
+ * drawer there (A, 0-9 ...) when dest has them. It then counts as
+ * current. 0 = installed, -1 = failed, -2 = stopped. */
+int  engine_install(Engine *e, long i, const char *dest, BPTR log);
+/* A Kickstart image some game needs that is not in DEVS:Kickstarts. */
+typedef struct {
+    char name[48];          /* "34005.a500": WHDLoad loads DEVS:Kickstarts/kick34005.a500 */
+    unsigned short crc;     /* what WHDLoad checks it by */
+    long games;             /* how many games ask for it */
+    char found[300];        /* a file with that CRC (engine_find_kicks), or "" */
+} KickNeed;
+/* The images the installed games need and DEVS:Kickstarts lacks, at most
+ * max into need. How many. */
+int  engine_kicks_needed(Engine *e, KickNeed *need, int max);
+/* Look through dir (and drawers in it, 3 levels) for files the size of a
+ * Kickstart whose CRC is one of need[]'s; their paths into found. How many
+ * found; -2 = stopped. */
+int  engine_find_kicks(const char *dir, KickNeed *need, int n);
+/* Copy k->found to DEVS:Kickstarts/kick<name>. 0 = done (*rtb = 0 when
+ * the .RTB file WHDLoad also needs is not there), -1 = failed. */
+int  engine_copy_kick(const KickNeed *k, int *rtb);
+
+/* The first drawer of family fam in the settings, "" if none. */
+void engine_family_dir(const Engine *e, int fam, char *out, int size);
 
 #define LOGFILE "PROGDIR:WHDUpdate.log"
 

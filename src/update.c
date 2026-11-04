@@ -456,6 +456,31 @@ static void keep_icons_in(const char *olddir, const char *newdir)
     UnLock(lock);
 }
 
+int count_saves(const char *path)
+{
+    char sub[P];
+    BPTR lock = Lock((STRPTR)path, ACCESS_READ);
+    struct FileInfoBlock *fib;
+    int n = 0;
+    if (!lock)
+        return 0;
+    if ((fib = (struct FileInfoBlock *)AllocDosObject(DOS_FIB, NULL)) != NULL) {
+        if (Examine(lock, fib))
+            while (ExNext(lock, fib)) {
+                cat_path(sub, path, (const char *)fib->fib_FileName);
+                if (!sub[0])
+                    continue;
+                if (fib->fib_DirEntryType > 0)
+                    n += count_saves(sub);
+                else if (is_save((const char *)fib->fib_FileName))
+                    n++;
+            }
+        FreeDosObject(DOS_FIB, fib);
+    }
+    UnLock(lock);
+    return n;
+}
+
 /* ---- the new drawer ---------------------------------------------------- */
 
 /* The one drawer a pack unpacks to (its name into name). */
@@ -480,13 +505,15 @@ static int unpacked_drawer(const char *dir, char *name)
     return n == 1;
 }
 
-/* What the slave in dir says its version is ("" if it doesn't). */
-static void slave_version(const char *dir, char *ver, int size)
+/* What the slave in dir says its version is ("" if it doesn't); *si =
+ * all it says (zeroed when there is none). */
+static void slave_info(const char *dir, char *ver, int size, SlaveInfo *si_out)
 {
     BPTR lock = Lock((STRPTR)dir, ACCESS_READ);
     struct FileInfoBlock *fib;
     char slave[P];
     ver[0] = slave[0] = 0;
+    memset(si_out, 0, sizeof(*si_out));
     if (!lock)
         return;
     if ((fib = (struct FileInfoBlock *)AllocDosObject(DOS_FIB, NULL)) != NULL) {
@@ -508,11 +535,41 @@ static void slave_version(const char *dir, char *ver, int size)
         if (fh && buf && (n = Read(fh, buf, 65536)) > 0 && slave_parse(buf, n, &si)) {
             strncpy(ver, si.version, size - 1);
             ver[size - 1] = 0;
+            *si_out = si;
         }
         if (fh)
             Close(fh);
         free(buf);
     }
+}
+
+static void log_line(const UpdateConf *c, const char *s);
+
+/* A new drawer's slave may ask for a Kickstart image the old one didn't
+ * (SevenCitiesOfGold v1.1 took 1.3, v2.1b takes the A1000's 1.1): say so
+ * when none of its images is in DEVS:Kickstarts, and log it. */
+static void kick_note(const UpdateConf *c, const char *path, const SlaveInfo *si)
+{
+    char one[48], f[80], msg[P + 120];
+    const char *p = si->kick;
+    int n;
+    if (!p[0])
+        return;
+    while (*p) {
+        for (n = 0; *p && *p != '|' && n < (int)sizeof(one) - 1; )
+            one[n++] = *p++;
+        one[n] = 0;
+        if (*p == '|')
+            p++;
+        snprintf(f, sizeof(f), "DEVS:Kickstarts/kick%s", one);
+        if (exists(f))
+            return;
+    }
+    n = (int)(strchr(si->kick, '|') ? strchr(si->kick, '|') - si->kick : (int)strlen(si->kick));
+    say("  NOTE: it needs DEVS:Kickstarts/kick%.*s%s, which is not there - it won't start until it is",
+        n, si->kick, strchr(si->kick, '|') ? " (or another)" : "");
+    snprintf(msg, sizeof(msg), "NOTE %s needs DEVS:Kickstarts/kick%s (not there)", path, si->kick);
+    log_line(c, msg);
 }
 
 static void log_line(const UpdateConf *c, const char *s)
@@ -587,19 +644,18 @@ int remove_game(BPTR log, const char *path, int keep)
     return 0;
 }
 
-int update_game(const UpdateConf *c, const char *path, const Pack *p, const char *installed)
+/* Steps 1 and 2 on volume vol (with a colon): download p into
+ * vol:WHDUpdate-Old/.work/, check it, unpack it there; the new drawer into
+ * newdir (its name into newname). work = the work drawer, to delete after.
+ * 0 = done, -1 = failed (said why; work deleted), -2 = stopped. */
+static int fetch_pack(const UpdateConf *c, const char *vol, const Pack *p, char *work,
+                      char *newdir, char *newname)
 {
-    char vol[P], olddir[P], work[P], pack[P], unp[P], newname[108], newdir[P], newinfo[P];
-    char backup[P], oldinfo[P], backinfo[P], url[P], enc[P], cmd[P * 2], ver[16], msg[P + 200];
-    const char *colon = strchr(path, ':');
+    char olddir[P], pack[P], unp[P], url[P], enc[P], cmd[P * 2];
     unsigned long got = 0, crc = 0;
     BPTR fh;
-    int rc, kept;
+    int rc;
 
-    if (!colon || strlen(path) > P - 40)
-        return -1;
-    memcpy(vol, path, colon + 1 - path);
-    vol[colon + 1 - path] = 0;
     cat_path(olddir, vol, OLDDIR);
     cat_path(work, olddir, ".work");
     if (!make_old_dir(olddir)) {
@@ -662,6 +718,48 @@ int update_game(const UpdateConf *c, const char *path, const Pack *p, const char
         goto fail;
     }
     cat_path(newdir, unp, newname);
+    return 0;
+
+fail:
+    delete_tree(work);
+    return -1;
+}
+
+/* ArchiveName.txt in drawer path: which pack it holds, for the next check
+ * (the slave does not always carry the pack's whole version - 2.1 in
+ * SevenCitiesOfGold v2.1b). The same file and name WHDFetch writes. */
+static void write_archive_name(const char *path, const Pack *p)
+{
+    char mark[P];
+    BPTR fh;
+    cat_path(mark, path, "ArchiveName.txt");
+    if ((fh = Open((STRPTR)mark, MODE_NEWFILE)) != 0) {
+        FPuts(fh, (STRPTR)p->file);
+        FPuts(fh, (STRPTR)"\n");
+        Close(fh);
+    }
+}
+
+int update_game(const UpdateConf *c, const char *path, const Pack *p, const char *installed)
+{
+    char vol[P], olddir[P], work[P], newname[108], newdir[P], newinfo[P];
+    char backup[P], oldinfo[P], backinfo[P], ver[16], msg[P + 200];
+    const char *colon = strchr(path, ':');
+    int rc, kept;
+
+    if (!colon || strlen(path) > P - 40)
+        return -1;
+    memcpy(vol, path, colon + 1 - path);
+    vol[colon + 1 - path] = 0;
+    cat_path(olddir, vol, OLDDIR);
+    rc = fetch_pack(c, vol, p, work, newdir, newname);
+    if (rc == -2)
+        return -2;
+    if (rc) {
+        snprintf(msg, sizeof(msg), "FAILED %s (%s), nothing changed", path, p->file);
+        log_line(c, msg);
+        return -1;
+    }
     snprintf(newinfo, sizeof(newinfo), "%s.info", newdir);
 
     /* 3. saves  4. icons inside the drawer */
@@ -702,21 +800,12 @@ int update_game(const UpdateConf *c, const char *path, const Pack *p, const char
         copy_file(backinfo, oldinfo);            /* the pack has no drawer icon: keep yours */
     }
     delete_tree(work);
-
-    /* Which pack this drawer now holds, for the next check: the slave does
-     * not always carry the pack's whole version (2.1 in SevenCitiesOfGold
-     * v2.1b). The same file and name WHDFetch writes. */
+    write_archive_name(path, p);
     {
-        char mark[P];
-        BPTR fh;
-        cat_path(mark, path, "ArchiveName.txt");
-        if ((fh = Open((STRPTR)mark, MODE_NEWFILE)) != 0) {
-            FPuts(fh, (STRPTR)p->file);
-            FPuts(fh, (STRPTR)"\n");
-            Close(fh);
-        }
+        SlaveInfo si;
+        slave_info(path, ver, sizeof(ver), &si);
+        kick_note(c, path, &si);
     }
-    slave_version(path, ver, sizeof(ver));
     say("  updated to %s%s; the old one is in %s", ver[0] ? ver : p->ver,
            kept ? ", saves kept" : "", backup);
     snprintf(msg, sizeof(msg), "updated %s %s -> %s (%s), %d save(s) kept, old copy %s",
@@ -729,4 +818,84 @@ fail:
     snprintf(msg, sizeof(msg), "FAILED %s (%s), nothing changed", path, p->file);
     log_line(c, msg);
     return -1;
+}
+
+/* The letter drawer for name in dest ("A", or "0-9" / "0" / "#" for a
+ * digit) when dest has one, else dest itself. */
+static void letter_drawer(const char *dest, const char *name, char *out)
+{
+    static const char *const digits[] = {"0-9", "0", "#", "123", NULL};
+    char try_[P], l[2];
+    int i;
+    strcpy(out, dest);
+    if (name[0] >= '0' && name[0] <= '9') {
+        for (i = 0; digits[i]; i++) {
+            cat_path(try_, dest, digits[i]);
+            if (try_[0] && exists(try_)) {
+                strcpy(out, try_);
+                return;
+            }
+        }
+        return;
+    }
+    l[0] = (char)(name[0] >= 'a' && name[0] <= 'z' ? name[0] - 32 : name[0]);
+    l[1] = 0;
+    cat_path(try_, dest, l);
+    if (l[0] >= 'A' && l[0] <= 'Z' && try_[0] && exists(try_))
+        strcpy(out, try_);
+}
+
+int install_game(const UpdateConf *c, const char *dest, const char *name, const Pack *p,
+                 char *path, int size)
+{
+    char vol[P], work[P], newname[108], newdir[P], newinfo[P], into[P], target[P], tinfo[P];
+    char msg[P + 200];
+    const char *colon = strchr(dest, ':');
+    int rc;
+
+    path[0] = 0;
+    if (!colon || strlen(dest) > P - 140 || !exists(dest)) {
+        say("  cannot find the drawer %s", dest);
+        return -1;
+    }
+    memcpy(vol, dest, colon + 1 - dest);
+    vol[colon + 1 - dest] = 0;
+    letter_drawer(dest, name, into);
+    rc = fetch_pack(c, vol, p, work, newdir, newname);
+    if (rc == -2)
+        return -2;
+    if (rc) {
+        snprintf(msg, sizeof(msg), "FAILED to install %s into %s", p->file, into);
+        log_line(c, msg);
+        return -1;
+    }
+    cat_path(target, into, newname);
+    snprintf(newinfo, sizeof(newinfo), "%s.info", newdir);
+    snprintf(tinfo, sizeof(tinfo), "%s.info", target);
+    if (exists(target)) {
+        say("  %s is there already: not touched", target);
+        delete_tree(work);
+        return -1;
+    }
+    if (!Rename((STRPTR)newdir, (STRPTR)target)) {
+        say("  cannot move the new drawer into %s", into);
+        delete_tree(work);
+        return -1;
+    }
+    if (exists(newinfo) && !exists(tinfo))
+        Rename((STRPTR)newinfo, (STRPTR)tinfo);
+    delete_tree(work);
+    write_archive_name(target, p);
+    if ((int)strlen(target) < size)
+        strcpy(path, target);
+    say("  installed in %s", target);
+    snprintf(msg, sizeof(msg), "installed %s (%s)", target, p->file);
+    log_line(c, msg);
+    {
+        SlaveInfo si;
+        char ver[16];
+        slave_info(target, ver, sizeof(ver), &si);
+        kick_note(c, target, &si);
+    }
+    return 0;
 }

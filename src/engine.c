@@ -2,7 +2,10 @@
  * any output of their own beyond say(): the Shell and the window show it
  * their way. */
 #include <exec/types.h>
+#include <exec/memory.h>
+#include <exec/execbase.h>
 #include <dos/dos.h>
+#include <graphics/gfxbase.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <stdio.h>
@@ -193,6 +196,10 @@ void engine_clear(Engine *e)
         free(e->games[i]);
     e->n = 0;
     memset(e->st, 0, sizeof(e->st));
+    scan_errors = 0;
+    free(e->dupord);              /* it points at the games */
+    e->dupord = NULL;
+    e->ndup = 0;
 }
 
 void engine_free(Engine *e)
@@ -397,6 +404,7 @@ typedef struct {
     long asize;
     struct DateStamp ads;
     char arc[120];
+    int req;                /* si has the flags, memory and Kickstart: 2 = with its CRCs */
 } CacheEntry;
 
 struct ScanCache {
@@ -484,13 +492,13 @@ static void cache_load(Engine *e)
     if (!buf)
         return;
     for (line = (char *)buf; line && *line; line = next) {
-        char *p = line, *f[19];
+        char *p = line, *f[24];
         CacheEntry *ce;
         int i;
         next = strchr(line, '\n');
         if (next)
             *next++ = 0;
-        for (i = 0; i < 19; i++)
+        for (i = 0; i < 24; i++)
             f[i] = field(&p);
         if (!f[15] || !f[0][0] || !f[1][0])
             continue;
@@ -511,6 +519,23 @@ static void cache_load(Engine *e)
         set_str(ce->arc, sizeof(ce->arc), f[15]);
         if (f[18]) {
             ce->dd.ds_Days = atol(f[16]); ce->dd.ds_Minute = atol(f[17]); ce->dd.ds_Tick = atol(f[18]);
+        }
+        if (f[22]) {                          /* what the slave asks of the machine */
+            ce->si.flags = (unsigned short)atoi(f[19]);
+            ce->si.basemem = (unsigned long)atol(f[20]);
+            ce->si.expmem = atol(f[21]);
+            set_str(ce->si.kick, sizeof(ce->si.kick), f[22]);
+            ce->req = 1;
+        }
+        if (f[23]) {                          /* the Kickstarts' CRCs, '|' between */
+            char *c = f[23];
+            int k;
+            for (k = 0; k < 4 && *c; k++) {
+                ce->si.kickcrc[k] = (unsigned short)strtoul(c, &c, 16);
+                if (*c == '|')
+                    c++;
+            }
+            ce->req = 2;
         }
         if (!ce->path || !ce->slave) {
             free(ce->path);
@@ -542,13 +567,21 @@ static void cache_save(Engine *e)
         return;
     for (i = 0; i < c->n; i++) {
         const CacheEntry *ce = &c->e[i];
-        char line[1024];
-        int n = snprintf(line, sizeof(line), "%s\t%s\t%ld\t%ld\t%ld\t%ld\t%d\t%u\t%s\t%s\t%s\t%ld\t%ld\t%ld\t%ld\t%s\t%ld\t%ld\t%ld\n",
+        char line[1100];
+        int n = snprintf(line, sizeof(line), "%s\t%s\t%ld\t%ld\t%ld\t%ld\t%d\t%u\t%s\t%s\t%s\t%ld\t%ld\t%ld\t%ld\t%s\t%ld\t%ld\t%ld",
                          ce->path, ce->slave, ce->size, (long)ce->ds.ds_Days, (long)ce->ds.ds_Minute,
                          (long)ce->ds.ds_Tick, ce->ok, (unsigned)ce->si.ws_version, ce->si.name,
                          ce->si.version, ce->si.date, ce->asize, (long)ce->ads.ds_Days,
                          (long)ce->ads.ds_Minute, (long)ce->ads.ds_Tick, ce->arc,
                          (long)ce->dd.ds_Days, (long)ce->dd.ds_Minute, (long)ce->dd.ds_Tick);
+        if (n > 0 && n < (int)sizeof(line) - 1 && ce->req)
+            n += snprintf(line + n, sizeof(line) - n, "\t%u\t%lu\t%ld\t%s\t%x|%x|%x|%x", (unsigned)ce->si.flags,
+                          ce->si.basemem, ce->si.expmem, ce->si.kick, ce->si.kickcrc[0], ce->si.kickcrc[1],
+                          ce->si.kickcrc[2], ce->si.kickcrc[3]);
+        if (n > 0 && n < (int)sizeof(line) - 1) {
+            line[n++] = '\n';
+            line[n] = 0;
+        }
         if (!ce->slave[0] || n <= 0 || n >= (int)sizeof(line))
             continue;                         /* no slave: a removed game */
         if (Write(fh, line, n) != n)
@@ -624,6 +657,27 @@ static void cache_put(Engine *e, CacheEntry *ce, const char *slave, const GameFi
     ce->asize = gf->arc_size;
     ce->ads = gf->arc_date;
     set_str(ce->arc, sizeof(ce->arc), arc ? arc : "");
+    ce->req = 2;
+    e->cache->dirty = 1;
+}
+
+static int read_slave(Engine *e, const char *path, const char *slave, SlaveInfo *si);
+
+/* An entry from a cache written before 0.9 lacks what the slave asks of the
+ * machine: the slave is read once more (the drawer itself needs no listing). */
+static void cache_req(Engine *e, CacheEntry *ce, const char *path)
+{
+    SlaveInfo si;
+    if (ce->req == 2 || (ce->req && !ce->si.kick[0]))
+        return;                           /* (no Kickstart: no CRCs to read) */
+    if (ce->ok && read_slave(e, path, ce->slave, &si)) {
+        ce->si.flags = si.flags;
+        ce->si.basemem = si.basemem;
+        ce->si.expmem = si.expmem;
+        strcpy(ce->si.kick, si.kick);
+        memcpy(ce->si.kickcrc, si.kickcrc, sizeof(si.kickcrc));
+    }
+    ce->req = 2;
     e->cache->dirty = 1;
 }
 
@@ -732,6 +786,13 @@ static int add_found(Engine *e, const char *path, const char *name, const char *
     strcpy(g->installed, m.installed);
     g->pack = m.newest;
     g->family = e->cur_family;
+    g->wsver = si->ws_version;
+    g->wsflags = si->flags;
+    g->basemem = si->basemem;
+    g->expmem = si->expmem;
+    strcpy(g->kick, si->kick);
+    memcpy(g->kickcrc, si->kickcrc, sizeof(g->kickcrc));
+    g->saves = -1;
     e->games[e->n++] = g;
     e->st[m.status]++;
     if (e->seen)
@@ -752,6 +813,7 @@ static int on_game(void *ctx, const char *path, const char *name, const char *sl
         return break_pressed();
     ce = cache_find(e, path, slave, gf, &slot);
     if (ce) {                                     /* the drawer as it was: no file to read */
+        cache_req(e, ce, path);
         if (ce->ok)
             si = ce->si;
         else
@@ -788,6 +850,7 @@ static int on_dir(void *ctx, const char *path, const char *name, const struct Da
         return 0;
     if (e->pattern && !MatchPatternNoCase((STRPTR)e->pattern, (STRPTR)name))
         return break_pressed() ? -1 : 1;
+    cache_req(e, ce, path);
     if (ce->ok)
         si = ce->si;
     else
@@ -911,6 +974,7 @@ static void on_missing(void *ctx, const Pack *p)
     g->name = (char *)(g + 1);
     strcpy((char *)g->name, name);
     g->status = M_MISSING;
+    g->saves = -1;
     g->pack = p;
     g->family = pack_sets[p->set].family;
     if (!add_game(e, g))
@@ -1011,9 +1075,513 @@ int engine_remove(Engine *e, long i, int keep, BPTR log)
             c->dirty = 1;
         }
     }
+    free(e->dupord);                          /* engine_dupes again before it is used */
+    e->dupord = NULL;
+    e->ndup = 0;
     e->st[g->status]--;
     memmove(&e->games[i], &e->games[i + 1], (e->n - i - 1) * sizeof(Game *));
     e->n--;
     free(g);
+    return 0;
+}
+
+/* ---- Won't run here ------------------------------------------------------ */
+
+/* "$VER: WHDLoad 18.9 (..)" in C:WHDLoad -> 18 */
+static int whdload_version(void)
+{
+    unsigned long len, i;
+    unsigned char *b = load_file("C:WHDLoad", &len, 400000UL);
+    int v = 0;
+    if (!b)
+        return 0;
+    for (i = 0; i + 15 < len; i++)
+        if (b[i] == '$' && !memcmp(b + i, "$VER: WHDLoad ", 14) && b[i + 14] >= '0' && b[i + 14] <= '9') {
+            const unsigned char *q = b + i + 14;
+            while (*q >= '0' && *q <= '9')
+                v = v * 10 + *q++ - '0';
+            break;
+        }
+    free(b);
+    return v;
+}
+
+void engine_machine(Engine *e)
+{
+    struct GfxBase *gb;
+    if (e->mach_known)
+        return;
+    /* the system keeps a little of it (2 MB shows as 2,093,056): rounded up
+     * to the 512 KB the machine was built with */
+    e->mach.chip = (AvailMem(MEMF_CHIP | MEMF_TOTAL) + 0x7ffffUL) & ~0x7ffffUL;
+    e->mach.fast = AvailMem(MEMF_FAST | MEMF_TOTAL);
+    e->mach.cpu020 = (SysBase->AttnFlags & AFF_68020) != 0;
+    e->mach.aga = 0;
+    if ((gb = (struct GfxBase *)OpenLibrary((STRPTR)"graphics.library", 39)) != NULL) {
+        e->mach.aga = (gb->ChipRevBits0 & GFXF_AA_ALICE) != 0;
+        CloseLibrary((struct Library *)gb);
+    }
+    e->mach.whdload = whdload_version();
+    e->mach_known = 1;
+}
+
+/* Is one of the '|'-separated Kickstart images in DEVS:Kickstarts? The
+ * answers are kept: a few names serve every game. */
+static struct { char name[48]; int have; } known[32];
+static int nknown;                    /* names looked up in DEVS:Kickstarts */
+
+static int kick_present(const char *list)
+{
+    char one[48];
+    const char *p = list;
+    while (*p) {
+        int n = 0, k, have = -1;
+        while (*p && *p != '|' && n < (int)sizeof(one) - 1)
+            one[n++] = *p++;
+        one[n] = 0;
+        if (*p == '|')
+            p++;
+        for (k = 0; k < nknown; k++)
+            if (!strcmp(known[k].name, one))
+                have = known[k].have;
+        if (have < 0) {
+            char path[80];
+            BPTR l;
+            /* the slave names "34005.a500"; WHDLoad loads kick34005.a500 */
+            snprintf(path, sizeof(path), "DEVS:Kickstarts/kick%s", one);
+            l = Lock((STRPTR)path, ACCESS_READ);
+            if (l)
+                UnLock(l);
+            have = l != 0;
+            if (nknown < 32) {
+                strcpy(known[nknown].name, one);
+                known[nknown++].have = have;
+            }
+        }
+        if (have)
+            return 1;
+    }
+    return 0;
+}
+
+static void why_add(char *why, int size, const char *s)
+{
+    int l = (int)strlen(why);
+    if (l + 3 + (int)strlen(s) < size)
+        snprintf(why + l, size - l, "%s%s", l ? ", " : "", s);
+}
+
+int engine_cantrun(Engine *e, const Game *g, char *why, int size)
+{
+    int r = 0;
+    char t[64];
+    if (why)
+        why[0] = 0;
+    if (!g->path || !g->wsver)
+        return 0;
+    engine_machine(e);
+    if ((g->wsflags & WHDLF_REQAGA) && !e->mach.aga) {
+        r |= CANT_AGA;
+        if (why) why_add(why, size, "AGA");
+    }
+    if ((g->wsflags & WHDLF_REQ68020) && !e->mach.cpu020) {
+        r |= CANT_CPU;
+        if (why) why_add(why, size, "68020");
+    }
+    /* the game's chip memory comes out of the machine's; WHDLoad takes the
+     * whole of it over, so all of it counts */
+    if (g->basemem > e->mach.chip) {
+        r |= CANT_CHIP;
+        snprintf(t, sizeof(t), "%lu KB chip", g->basemem / 1024);
+        if (why) why_add(why, size, t);
+    }
+    /* expansion memory it can't do without: fast RAM, else what chip RAM
+     * is left over */
+    if (g->expmem > 0 && (unsigned long)g->expmem >
+        e->mach.fast + (e->mach.chip > g->basemem ? e->mach.chip - g->basemem : 0)) {
+        r |= CANT_MEM;
+        snprintf(t, sizeof(t), "%ld KB fast", g->expmem / 1024);
+        if (why) why_add(why, size, t);
+    }
+    if (g->kick[0] && !kick_present(g->kick)) {
+        const char *bar = strchr(g->kick, '|');
+        r |= CANT_KICK;
+        snprintf(t, sizeof(t), "kick%.*s%s", bar ? (int)(bar - g->kick) : 40, g->kick, bar ? " (or another)" : "");
+        if (why) why_add(why, size, t);
+    }
+    if (e->mach.whdload && g->wsver > e->mach.whdload) {
+        r |= CANT_WHDL;
+        snprintf(t, sizeof(t), "WHDLoad %u", (unsigned)g->wsver);
+        if (why) why_add(why, size, t);
+    }
+    return r;
+}
+
+/* ---- Duplicates ------------------------------------------------------------ */
+
+typedef struct {
+    Game *g;
+    char key[72];
+} DupKey;
+
+static int dup_cmp(const DupKey *a, const DupKey *b)
+{
+    int c = strcmp(a->key, b->key);
+    return c ? c : strcmp(a->g->path, b->g->path);
+}
+
+long engine_dupes(Engine *e)
+{
+    DupKey *k;
+    long i, n = 0, gap, j, group = 0;
+    free(e->dupord);
+    e->dupord = NULL;
+    e->ndup = 0;
+    for (i = 0; i < e->n; i++)
+        e->games[i]->dupe = 0;
+    k = (DupKey *)malloc((e->n + 1) * sizeof(DupKey));
+    if (!k)
+        return 0;
+    for (i = 0; i < e->n; i++) {
+        Game *g = e->games[i];
+        if (!g->path)
+            continue;
+        k[n].g = g;
+        /* a copy has the same drawer name somewhere else (letters and
+         * digits, any case); the pack is no guide - when no pack has a
+         * drawer's own name, near names match the same one
+         * (AfterBurnerActivision and AfterBurnerSega) */
+        norm_name(g->name, k[n].key, (int)sizeof(k[n].key));
+        n++;
+    }
+    for (gap = n / 2; gap > 0; gap /= 2)        /* Shell sort: no recursion */
+        for (i = gap; i < n; i++) {
+            DupKey t = k[i];
+            for (j = i; j >= gap && dup_cmp(&k[j - gap], &t) > 0; j -= gap)
+                k[j] = k[j - gap];
+            k[j] = t;
+        }
+    e->dupord = (Game **)malloc((n + 1) * sizeof(Game *));
+    for (i = 0; i < n; ) {
+        for (j = i + 1; j < n && !strcmp(k[j].key, k[i].key); j++)
+            ;
+        if (j - i > 1) {
+            group++;
+            for (; i < j; i++) {
+                k[i].g->dupe = group;
+                if (e->dupord)
+                    e->dupord[e->ndup++] = k[i].g;
+            }
+        }
+        i = j;
+    }
+    free(k);
+    return e->ndup;
+}
+
+void engine_count_saves(Game *g)
+{
+    if (g->path && g->saves < 0)
+        g->saves = count_saves(g->path);
+}
+
+/* ---- Export ----------------------------------------------------------------- */
+
+/* One CSV field: quoted when it has a comma, a quote or a space at an end. */
+static void csv(BPTR fh, const char *s, int last)
+{
+    const char *p;
+    int q = 0;
+    for (p = s; *p; p++)
+        if (*p == ',' || *p == '"' || *p == '\n')
+            q = 1;
+    if (q) {
+        FPutC(fh, '"');
+        for (p = s; *p; p++) {
+            if (*p == '"')
+                FPutC(fh, '"');
+            FPutC(fh, *p);
+        }
+        FPutC(fh, '"');
+    } else
+        FPuts(fh, (STRPTR)s);
+    FPutC(fh, last ? '\n' : ',');
+}
+
+/* The language (sys 0) or system (sys 1) words of a pack, '+' between. */
+static void variant_labels(const Pack *p, int sys, char *out, int size)
+{
+    int i, o = 0;
+    const char *prev = "";
+    out[0] = 0;
+    if (!p)
+        return;
+    for (i = 0; variant_words[i].word; i++)
+        if (variant_words[i].system == sys && (p->vbits >> i & 1) && strcmp(prev, variant_words[i].label)) {
+            o += snprintf(out + o, size - o, "%s%s", o ? "+" : "", variant_words[i].label);
+            prev = variant_words[i].label;
+            if (o >= size - 1)
+                break;
+        }
+}
+
+int engine_export(Engine *e, BPTR fh, int (*want)(const Game *g))
+{
+    long i;
+    FPuts(fh, (STRPTR)"Name,Set,Status,Installed,Newest,Pack,Languages,Systems,Drawer,"
+                      "PackSize,PackCRC,WHDLoad,ChipKB,ExpKB,CPU,Chipset,Kickstart,WontRunHere,Saves\n");
+    for (i = 0; i < e->n; i++) {
+        const Game *g = e->games[i];
+        char t[200];
+        if (want && !want(g))
+            continue;
+        csv(fh, g->name, 0);
+        csv(fh, g->pack ? pack_sets[g->pack->set].label :
+                g->family >= 0 ? pack_sets[g->family == FAM_GAMES ? SET_GAMES :
+                                           g->family == FAM_DEMOS ? SET_DEMOS : SET_MAGS].label : "", 0);
+        csv(fh, status_word(g->status), 0);
+        csv(fh, g->status == M_MISSING ? "" : g->installed, 0);
+        csv(fh, g->pack ? g->pack->ver : "", 0);
+        csv(fh, g->pack ? g->pack->file : "", 0);
+        variant_labels(g->pack, 0, t, sizeof(t));
+        csv(fh, t, 0);
+        variant_labels(g->pack, 1, t, sizeof(t));
+        csv(fh, t, 0);
+        csv(fh, g->path ? g->path : "", 0);
+        snprintf(t, sizeof(t), "%lu", g->pack ? g->pack->size : 0UL);
+        csv(fh, g->pack ? t : "", 0);
+        snprintf(t, sizeof(t), "%08lx", g->pack ? g->pack->crc : 0UL);
+        csv(fh, g->pack ? t : "", 0);
+        if (g->wsver) {
+            snprintf(t, sizeof(t), "%u", (unsigned)g->wsver);
+            csv(fh, t, 0);
+            snprintf(t, sizeof(t), "%lu", g->basemem / 1024);
+            csv(fh, t, 0);
+            snprintf(t, sizeof(t), "%ld", g->expmem / 1024);
+            csv(fh, t, 0);
+            csv(fh, g->wsflags & WHDLF_REQ68020 ? "68020" : "68000", 0);
+            csv(fh, g->wsflags & WHDLF_REQAGA ? "AGA" : "", 0);
+            csv(fh, g->kick, 0);
+            engine_cantrun(e, g, t, sizeof(t));
+            csv(fh, t, 0);
+        } else
+            FPuts(fh, (STRPTR)",,,,,,,");
+        snprintf(t, sizeof(t), "%d", g->saves);
+        csv(fh, g->saves >= 0 ? t : "", 1);
+    }
+    return 0;
+}
+
+/* ---- Install missing games ------------------------------------------------ */
+
+void engine_family_dir(const Engine *e, int fam, char *out, int size)
+{
+    const char *s = e->prefs.dirs[fam < 0 ? FAM_GAMES : fam];
+    int n = 0;
+    while (*s == ' ')
+        s++;
+    while (*s && *s != ';' && n < size - 1)
+        out[n++] = *s++;
+    while (n && out[n - 1] == ' ')
+        n--;
+    out[n] = 0;
+}
+
+int engine_install(Engine *e, long i, const char *dest, BPTR log)
+{
+    Game *g = e->games[i], *ng;
+    UpdateConf c;
+    char path[600];
+    int rc;
+    if (g->status != M_MISSING || !g->pack)
+        return -1;
+    if (!SocketBase) {
+        say("Installing needs the network (no bsdsocket.library).");
+        return -1;
+    }
+    memset(&c, 0, sizeof(c));
+    c.host = e->prefs.host;
+    c.webdir = e->prefs.webdir;
+    c.ftpdir = e->prefs.ftpdir;
+    c.setdir = pack_sets[g->pack->set].dir;
+    c.ftp_only = e->prefs.ftp_only;
+    c.log = log;
+    ftp_login(e->prefs.user, e->prefs.pass);
+    rc = install_game(&c, dest, g->name, g->pack, path, sizeof(path));
+    if (rc)
+        return rc;
+    /* now an installed game: a new entry with its drawer */
+    ng = (Game *)malloc(sizeof(Game) + strlen(path) + 1);
+    if (!ng)
+        return 0;                             /* installed; the next check lists it */
+    memset(ng, 0, sizeof(Game));
+    ng->path = (char *)(ng + 1);
+    strcpy(ng->path, path);
+    {
+        const char *leaf = ng->path + strlen(ng->path);
+        while (leaf > ng->path && leaf[-1] != '/' && leaf[-1] != ':')
+            leaf--;
+        ng->name = leaf;
+    }
+    ng->status = M_CURRENT;
+    strncpy(ng->installed, g->pack->ver, sizeof(ng->installed) - 1);
+    ng->pack = g->pack;
+    ng->family = g->family;
+    ng->saves = -1;
+    e->st[M_MISSING]--;
+    e->st[M_CURRENT]++;
+    e->games[i] = ng;
+    free(g);
+    return 0;
+}
+
+/* ---- Kickstart images under other names ------------------------------------- */
+
+/* WHDLoad's CRC16 (resload_CRC16): CRC-16/ARC, polynomial $8005 reflected. */
+static unsigned short crc16(const unsigned char *b, unsigned long n)
+{
+    unsigned short c = 0;
+    while (n--) {
+        int k;
+        c ^= *b++;
+        for (k = 0; k < 8; k++)
+            c = (unsigned short)(c & 1 ? (c >> 1) ^ 0xa001 : c >> 1);
+    }
+    return c;
+}
+
+int engine_kicks_needed(Engine *e, KickNeed *need, int max)
+{
+    long i;
+    int n = 0;
+    nknown = 0;                           /* DEVS:Kickstarts may have changed */
+    for (i = 0; i < e->n; i++) {
+        const Game *g = e->games[i];
+        const char *p = g->kick;
+        int k = 0;
+        if (!g->path || !g->kick[0] || kick_present(g->kick))
+            continue;
+        while (*p) {                          /* each of its images (any one will do) */
+            char one[48];
+            int l = 0, j;
+            while (*p && *p != '|' && l < (int)sizeof(one) - 1)
+                one[l++] = *p++;
+            one[l] = 0;
+            if (*p == '|')
+                p++;
+            for (j = 0; j < n && strcmp(need[j].name, one); j++)
+                ;
+            if (j < n)
+                need[j].games++;
+            else if (n < max) {
+                memset(&need[n], 0, sizeof(need[n]));
+                strcpy(need[n].name, one);
+                need[n].crc = k < 4 ? g->kickcrc[k] : 0;
+                need[n++].games = 1;
+            }
+            k++;
+        }
+    }
+    return n;
+}
+
+static int find_in(const char *dir, int depth, KickNeed *need, int n, unsigned char *buf, int *found)
+{
+    BPTR lock = Lock((STRPTR)dir, ACCESS_READ);
+    struct FileInfoBlock *fib;
+    int rc = 0;
+    if (!lock)
+        return 0;
+    if ((fib = (struct FileInfoBlock *)AllocDosObject(DOS_FIB, NULL)) != NULL) {
+        if (Examine(lock, fib))
+            while (rc == 0 && *found < n && ExNext(lock, fib)) {
+                char path[300];
+                int l = (int)strlen(dir);
+                if (l + (int)strlen((char *)fib->fib_FileName) + 2 > (int)sizeof(path))
+                    continue;
+                strcpy(path, dir);
+                if (l && dir[l - 1] != ':' && dir[l - 1] != '/')
+                    strcat(path, "/");
+                strcat(path, (char *)fib->fib_FileName);
+                if (break_pressed())
+                    rc = -2;
+                else if (fib->fib_DirEntryType > 0) {
+                    if (depth > 0)
+                        rc = find_in(path, depth - 1, need, n, buf, found);
+                } else if (fib->fib_Size == 262144 || fib->fib_Size == 524288) {
+                    BPTR fh = Open((STRPTR)path, MODE_OLDFILE);
+                    if (fh) {
+                        long got = Read(fh, buf, fib->fib_Size);
+                        Close(fh);
+                        if (got == fib->fib_Size) {
+                            unsigned short c = crc16(buf, (unsigned long)got);
+                            int j;
+                            for (j = 0; j < n; j++)
+                                if (!need[j].found[0] && need[j].crc && need[j].crc == c) {
+                                    strncpy(need[j].found, path, sizeof(need[j].found) - 1);
+                                    (*found)++;
+                                }
+                        }
+                    }
+                    busy("Looking for Kickstart images... %s", path);
+                }
+            }
+        FreeDosObject(DOS_FIB, fib);
+    }
+    UnLock(lock);
+    return rc;
+}
+
+int engine_find_kicks(const char *dir, KickNeed *need, int n)
+{
+    unsigned char *buf = (unsigned char *)malloc(524288);
+    int found = 0, j, rc;
+    if (!buf)
+        return 0;
+    for (j = 0; j < n; j++)
+        if (need[j].found[0])
+            found++;
+    rc = find_in(dir, 3, need, n, buf, &found);
+    free(buf);
+    return rc == -2 ? -2 : found;
+}
+
+int engine_copy_kick(const KickNeed *k, int *rtb)
+{
+    static unsigned char buf[16384];
+    char to[120];
+    BPTR in, out, l;
+    long got;
+    int ok = 1;
+    if ((l = Lock((STRPTR)"DEVS:Kickstarts", ACCESS_READ)) != 0)
+        UnLock(l);
+    else if ((l = CreateDir((STRPTR)"DEVS:Kickstarts")) != 0)
+        UnLock(l);
+    snprintf(to, sizeof(to), "DEVS:Kickstarts/kick%s", k->name);
+    if (!(in = Open((STRPTR)k->found, MODE_OLDFILE)))
+        return -1;
+    if (!(out = Open((STRPTR)to, MODE_NEWFILE))) {
+        Close(in);
+        return -1;
+    }
+    while ((got = Read(in, buf, sizeof(buf))) > 0)
+        if (Write(out, buf, got) != got) {
+            ok = 0;
+            break;
+        }
+    if (got < 0)
+        ok = 0;
+    Close(in);
+    Close(out);
+    if (!ok) {
+        DeleteFile((STRPTR)to);
+        return -1;
+    }
+    nknown = 0;
+    snprintf(to, sizeof(to), "DEVS:Kickstarts/kick%s.RTB", k->name);
+    l = Lock((STRPTR)to, ACCESS_READ);
+    if (l)
+        UnLock(l);
+    *rtb = l != 0;
     return 0;
 }

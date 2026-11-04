@@ -61,6 +61,8 @@ typedef int (*dir_fn)(void *ctx, const char *path, const char *name,
  * drawers: drawers with a WHDLoad slave in them. 0 = done, -1 = root not
  * found, -2 = stopped (Ctrl-C or the callback). */
 int scan_tree(const char *root, int depth, game_fn fn, dir_fn known, void *ctx);
+/* Drawers whose listing a read error cut short (counted, never reset here). */
+extern int scan_errors;
 
 /* Every mounted volume except RAM:, as "Name:" strings in one block
  * separated by NULs and ended by an empty one; free() it. */

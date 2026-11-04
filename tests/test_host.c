@@ -80,6 +80,30 @@ static void units(void)
         CHECK(!strcmp(si.name, "Test Game"));
         CHECK(!strcmp(si.version, "1.3b"));
         CHECK(!strcmp(si.date, "2012-07-16"));
+        CHECK(si.flags == 0 && si.basemem == 0 && si.kick[0] == 0);
+        /* flags, memory and one Kickstart (version 16+) */
+        s[32 + 14] = 0; s[32 + 15] = 0x30;              /* Req68020 | ReqAGA */
+        s[32 + 16] = 0; s[32 + 17] = 0x20; s[32 + 18] = 0; s[32 + 19] = 0;   /* 2 MB */
+        s[32 + 32] = 0xff; s[32 + 33] = 0xf8; s[32 + 34] = 0; s[32 + 35] = 0; /* -$80000 */
+        s[32 + 0x2a] = 0; s[32 + 0x2b] = 0x90;          /* ws_kickname */
+        s[32 + 0x30] = 0x12; s[32 + 0x31] = 0x34;       /* one crc */
+        strcpy((char *)s + 32 + 0x90, "kick40068.A1200");
+        CHECK(slave_parse(s, sizeof(s), &si) == 1);
+        CHECK((si.flags & WHDLF_REQ68020) && (si.flags & WHDLF_REQAGA));
+        CHECK(si.basemem == 0x200000UL);
+        CHECK(si.expmem == -0x80000L);
+        CHECK(!strcmp(si.kick, "kick40068.A1200"));
+        CHECK(si.kickcrc[0] == 0x1234);
+        /* a table of Kickstarts (kickcrc $ffff): crc.w + name.w, ended by 0 */
+        s[32 + 0x30] = 0xff; s[32 + 0x31] = 0xff;
+        s[32 + 0x2a] = 0; s[32 + 0x2b] = 0xb0;
+        s[32 + 0xb0] = 0x11; s[32 + 0xb1] = 0x11; s[32 + 0xb2] = 0; s[32 + 0xb3] = 0x90;
+        s[32 + 0xb4] = 0x22; s[32 + 0xb5] = 0x22; s[32 + 0xb6] = 0; s[32 + 0xb7] = 0xc0;
+        s[32 + 0xb8] = 0; s[32 + 0xb9] = 0;
+        strcpy((char *)s + 32 + 0xc0, "kick34005.A500");
+        CHECK(slave_parse(s, sizeof(s), &si) == 1);
+        CHECK(!strcmp(si.kick, "kick40068.A1200|kick34005.A500"));
+        CHECK(si.kickcrc[0] == 0x1111 && si.kickcrc[1] == 0x2222);
         CHECK(slave_parse((const unsigned char *)"not a slave at all", 18, &si) == 0);
     }
     {
@@ -236,7 +260,9 @@ int main(int argc, char **argv)
             unsigned char *b = load(argv[i], &len);
             SlaveInfo si;
             int ok = slave_parse(b, len, &si);
-            printf("%s\t%d\tws%u\t%s\t%s\t%s\n", argv[i], ok, si.ws_version, si.version, si.date, si.name);
+            printf("%s\t%d\tws%u\t%s\t%s\t%s\tflags %04x base %lx exp %ld kick %s crc %04x\n", argv[i], ok,
+                   si.ws_version, si.version, si.date, si.name, si.flags, si.basemem, si.expmem, si.kick,
+                   si.kickcrc[0]);
             free(b);
         }
     } else if (argc >= 4 && !strcmp(argv[1], "match")) {

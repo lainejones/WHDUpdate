@@ -28,6 +28,8 @@
 #include <graphics/gfxbase.h>
 #include <devices/inputevent.h>
 #include <utility/hooks.h>
+#include <libraries/asl.h>
+#include <proto/asl.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <proto/intuition.h>
@@ -44,6 +46,7 @@
 struct IntuitionBase *IntuitionBase = NULL;
 struct GfxBase *GfxBase = NULL;
 struct Library *GadToolsBase = NULL;
+struct Library *AslBase = NULL;
 
 #define M 6                       /* margin */
 #define GAP 4
@@ -52,20 +55,29 @@ enum { G_DIRS, G_CHECK, G_FIND, G_SUMMARY, G_SET, G_SHOW, G_LIST, G_UPDATE, G_MA
        G_STOP, G_STATUS, G_COUNT };
 
 static const char *show_labels[] = {"Updates", "All games", "To check", "Not found", "No version",
-                                    "Missing", "Not wanted", NULL};
+                                    "Missing", "Not wanted", "Won't run here", "Duplicates", NULL};
+#define SHOW_MISSING  5           /* packs you don't have: to install */
 #define SHOW_UNWANTED 6           /* games of a language or system turned off: to remove */
+#define SHOW_CANTRUN  7           /* games this machine can't run: to remove */
+#define SHOW_DUPES    8           /* games installed twice or more: to remove the extra copies */
+/* the views whose marks are for removing (Game.doomed) */
+#define REMOVING() (G.filter >= SHOW_UNWANTED)
 /* which pack set the list shows: 0 = all of them, else pack_sets[n - 1] */
 static const char *set_labels[] = {"All sets", "Games", "Games Beta", "Demos", "Demos Beta",
                                    "Magazines", NULL};
 
 enum { MN_CHECK = 1, MN_UPDATE, MN_ABOUT, MN_QUIT, MN_SERVER, MN_SETS, MN_LANG, MN_SYS, MN_FTPONLY,
-       MN_REMOVE };
+       MN_REMOVE, MN_INSTALL, MN_EXPORT, MN_KICKS };
 
 static struct NewMenu menu_def[] = {
     {NM_TITLE, (STRPTR)"Project", NULL, 0, 0, NULL},
     {NM_ITEM, (STRPTR)"Check", (STRPTR)"C", 0, 0, (APTR)MN_CHECK},
     {NM_ITEM, (STRPTR)"Update marked", (STRPTR)"U", 0, 0, (APTR)MN_UPDATE},
     {NM_ITEM, (STRPTR)"Remove marked...", (STRPTR)"R", 0, 0, (APTR)MN_REMOVE},
+    {NM_ITEM, (STRPTR)"Install marked...", (STRPTR)"I", 0, 0, (APTR)MN_INSTALL},
+    {NM_ITEM, NM_BARLABEL, NULL, 0, 0, NULL},
+    {NM_ITEM, (STRPTR)"Save list as CSV...", (STRPTR)"E", 0, 0, (APTR)MN_EXPORT},
+    {NM_ITEM, (STRPTR)"Find Kickstart images...", (STRPTR)"K", 0, 0, (APTR)MN_KICKS},
     {NM_ITEM, NM_BARLABEL, NULL, 0, 0, NULL},
     {NM_ITEM, (STRPTR)"About...", NULL, 0, 0, (APTR)MN_ABOUT},
     {NM_ITEM, NM_BARLABEL, NULL, 0, 0, NULL},
@@ -92,7 +104,8 @@ static struct {
     struct RastPort mrp;          /* for measuring text */
     struct List list;
     int filter, set, busy, stop, quit, cols;
-    long marked, doomed;          /* counted by set_summary */
+    long marked, doomed, getting; /* counted by set_summary: to update, remove, install */
+    int dupes_known;              /* engine_dupes() since the last check or removal */
     Game *sel;                    /* the game clicked last: stays highlighted */
     long top;                     /* the list's scroll position */
     struct IBox lvbox;            /* where the list is in the window */
@@ -107,6 +120,8 @@ static struct {
     char find[40];                /* part of a name: only those games are shown */
     struct Menu *menu;
 } G;
+
+static void show_dupes(void);
 
 /* ---- small helpers ------------------------------------------------------ */
 
@@ -173,14 +188,16 @@ static int shown(const Game *g)
     if (!in_set(g))
         return 0;
     if (g->status == M_MISSING)               /* not installed: only under Missing */
-        return G.filter == 5;
+        return G.filter == SHOW_MISSING;
     switch (G.filter) {
     case 0: return g->status == M_UPDATE;
     case 2: return g->status == M_CHECK || g->status == M_NEWER;
     case 3: return g->status == M_NOMATCH;
     case 4: return g->status == M_UNKNOWN;
-    case 5: return 0;
+    case SHOW_MISSING: return 0;
     case SHOW_UNWANTED: return engine_unwanted(G.e, g);
+    case SHOW_CANTRUN: return engine_cantrun(G.e, g, NULL, 0) != 0;
+    case SHOW_DUPES: return g->dupe != 0;
     default: return 1;
     }
 }
@@ -189,23 +206,58 @@ static int shown(const Game *g)
  * and its marks are apart from the update marks. */
 static int markable(const Game *g)
 {
-    if (G.filter == SHOW_UNWANTED)
+    if (REMOVING())
         return g->path != NULL;
+    if (G.filter == SHOW_MISSING)
+        return g->status == M_MISSING && g->pack;
     return g->pack && (g->status == M_UPDATE || g->status == M_CHECK);
 }
 
 static int is_marked(const Game *g)
 {
-    return G.filter == SHOW_UNWANTED ? g->doomed : g->marked;
+    return REMOVING() ? g->doomed : g->marked;
+}
+
+/* The drawer a game is in: its path without its own name. */
+static void parent_of(const Game *g, char *out, int size)
+{
+    int l = (int)(g->name - g->path);
+    if (l > 1 && g->path[l - 1] == '/')
+        l--;
+    if (l >= size)
+        l = size - 1;
+    memcpy(out, g->path, l);
+    out[l] = 0;
 }
 
 static void make_label(Game *g)
 {
     static const char *words[] = {"not found", "no version", "current", "update", "newer", "check",
                                   "missing"};
-    char vers[40];
+    char vers[48];
     int namew;
-    if (!g->pack)
+    const char *word = words[g->status];
+    char why[80];
+    if (G.filter == SHOW_CANTRUN && g->path) {
+        /* a missing Kickstart image or an old WHDLoad can be put right */
+        int r = engine_cantrun(G.e, g, why, sizeof(why));
+        word = r & ~(CANT_KICK | CANT_WHDL) ? "won't run" : "needs";
+        snprintf(vers, sizeof(vers), "%.39s", why);
+    } else if (G.filter == SHOW_DUPES && g->path) {
+        char where[200], w[30], sv[8];
+        int l;
+        parent_of(g, where, sizeof(where));
+        l = (int)strlen(where);
+        if (l > 26)                       /* the start and the end say where it is */
+            snprintf(w, sizeof(w), "%.12s..%s", where, where + l - 12);
+        else
+            strcpy(w, where);
+        if (g->saves > 0)
+            snprintf(sv, sizeof(sv), "%d sv", g->saves > 999 ? 999 : g->saves);
+        else
+            sv[0] = 0;
+        snprintf(vers, sizeof(vers), "%-6.6s %-26s %6s", g->installed[0] ? g->installed : "?", w, sv);
+    } else if (!g->pack)
         vers[0] = 0;
     else if (g->status == M_MISSING)
         snprintf(vers, sizeof(vers), "%s", g->pack->ver);
@@ -215,7 +267,7 @@ static void make_label(Game *g)
     if (namew < 8)
         namew = 8;
     snprintf(g->label, sizeof(g->label), "%c %-10s %-*.*s %s", is_marked(g) ? '*' : ' ',
-             words[g->status], namew, namew, g->name, vers);
+             word, namew, namew, g->name, vers);
     g->node.ln_Name = g->label;
 }
 
@@ -311,11 +363,12 @@ static void attach_list(void)
 
 static void rebuild_list(void)
 {
-    long i;
+    long i, n = G.filter == SHOW_DUPES ? G.e->ndup : G.e->n;
+    Game **from = G.filter == SHOW_DUPES ? G.e->dupord : G.e->games;
     detach_list();
     new_list(&G.list);
-    for (i = 0; i < G.e->n; i++) {
-        Game *g = G.e->games[i];
+    for (i = 0; from && i < n; i++) {     /* duplicates: a group after the other */
+        Game *g = from[i];
         if (shown(g)) {
             make_label(g);
             AddTail(&G.list, &g->node);
@@ -359,7 +412,7 @@ static long mark_rows(long a, long b, int on)
         Game *g = (Game *)nd;
         if (i < a || !markable(g) || !is_marked(g) == !on)
             continue;
-        if (G.filter == SHOW_UNWANTED)
+        if (REMOVING())
             g->doomed = on;
         else
             g->marked = on;
@@ -470,14 +523,17 @@ static void drag_preview(long r)
 static void set_summary(void)
 {
     Engine *e = G.e;
-    long marked = 0, n = 0, upd = 0, chk = 0, miss = 0, unw = 0, doomed = 0, i;
+    long marked = 0, n = 0, upd = 0, chk = 0, miss = 0, unw = 0, doomed = 0, getting = 0, cant = 0, i;
     for (i = 0; i < e->n; i++) {          /* counted in the set the Set cycle picks */
         const Game *g = e->games[i];
         if (!in_set(g))
             continue;
-        marked += g->marked;
+        marked += g->marked && g->status != M_MISSING;
+        getting += g->marked && g->status == M_MISSING;
         doomed += g->doomed;
         unw += engine_unwanted(e, g);
+        if (G.filter == SHOW_CANTRUN)
+            cant += engine_cantrun(e, g, NULL, 0) != 0;
         if (g->status == M_MISSING)
             miss++;
         else {
@@ -488,11 +544,22 @@ static void set_summary(void)
     }
     G.marked = marked;
     G.doomed = doomed;
+    G.getting = getting;
     if (!e->n)
         snprintf(G.summary, sizeof(G.summary), "No games checked yet");
     else if (G.filter == SHOW_UNWANTED)
         snprintf(G.summary, sizeof(G.summary), "%ld of %ld games not wanted, %ld marked to remove",
                  unw, n, doomed);
+    else if (G.filter == SHOW_CANTRUN)
+        snprintf(G.summary, sizeof(G.summary), "%ld won't run here (%ld KB chip, %ld KB fast, %s, %s%s), %ld marked",
+                 cant, (long)(e->mach.chip / 1024), (long)(e->mach.fast / 1024),
+                 e->mach.cpu020 ? "68020+" : "68000", e->mach.aga ? "AGA" : "no AGA",
+                 e->mach.whdload ? "" : ", no C:WHDLoad", doomed);
+    else if (G.filter == SHOW_DUPES)
+        snprintf(G.summary, sizeof(G.summary), "%ld copies of games you have more than once, %ld marked to remove",
+                 e->ndup, doomed);
+    else if (G.filter == SHOW_MISSING)
+        snprintf(G.summary, sizeof(G.summary), "%ld games you don't have, %ld marked to install", miss, getting);
     else
         snprintf(G.summary, sizeof(G.summary), "%ld games: %ld updates, %ld to check, %ld missing, %ld marked",
                  n, upd, chk, miss, marked);
@@ -507,9 +574,9 @@ static void marks_changed(const char *what)
     char txt[120];
     long n;
     set_summary();
-    n = G.filter == SHOW_UNWANTED ? G.doomed : G.marked;
+    n = REMOVING() ? G.doomed : G.filter == SHOW_MISSING ? G.getting : G.marked;
     snprintf(txt, sizeof(txt), "%s%s%ld marked to %s", what ? what : "", what ? ", " : "", n,
-             G.filter == SHOW_UNWANTED ? "remove" : "update");
+             REMOVING() ? "remove" : G.filter == SHOW_MISSING ? "install" : "update");
     gui_status(txt);
 }
 
@@ -536,7 +603,7 @@ static int make_gadgets(void)
     int top = w->BorderTop + 4, bottom = w->Height - w->BorderBottom - 4;
     int h = bh(), lw, cw, sw, y, bw, i, lvh;
     static const char *btn[] = {"Update marked", "Mark all", "Mark none", "Stop"};
-    btn[0] = G.filter == SHOW_UNWANTED ? "Remove marked" : "Update marked";
+    btn[0] = REMOVING() ? "Remove marked" : G.filter == SHOW_MISSING ? "Install marked" : "Update marked";
 
     memset(G.g, 0, sizeof(G.g));
     gad = CreateContext(&G.glist);
@@ -566,7 +633,7 @@ static int make_gadgets(void)
     /* Find [....] Set <cycle> Show <cycle> */
     y = top + h + GAP;
     lw = tlen("Drawers") + 8;                 /* lined up with the Drawers field */
-    cw = tlen("No version") + 32;
+    cw = tlen("Won't run here") + 32;          /* the longest Show label */
     sw = tlen("Games Beta") + 32;
     ng.ng_LeftEdge = left + lw;
     ng.ng_TopEdge = y;
@@ -781,6 +848,7 @@ static void do_check(void)
     G.top = 0;
     G.anchor = -1;            /* another list: rows mean other games */
     engine_clear(e);
+    G.dupes_known = 0;
     attach_list();
     set_summary();
     if (engine_dat(e, 0) == 0) {
@@ -788,7 +856,10 @@ static void do_check(void)
         if (!stopped)
             engine_missing(e);
         qsort(e->games, e->n, sizeof(Game *), cmp_games);
-        if (stopped)
+        if (scan_errors)
+            say("%d drawer%s could not be read completely (read errors): the list is short - Check again",
+                scan_errors, scan_errors == 1 ? "" : "s");
+        else if (stopped)
             say("Stopped: %ld games looked at", e->n);
         else if (e->st[M_UPDATE])
             say("Click the games to update (* = marked), then Update marked");
@@ -796,6 +867,8 @@ static void do_check(void)
             say("Everything is up to date (pack list of %s)", e->datdate);
     }
     set_busy(0);
+    if (G.filter == SHOW_DUPES && !stopped)
+        show_dupes();
     rebuild_list();
     set_summary();
 }
@@ -809,7 +882,7 @@ static void do_update(void)
     BPTR log;
 
     for (i = 0; i < e->n; i++)
-        n += e->games[i]->marked;
+        n += e->games[i]->marked && e->games[i]->path;
     if (!n) {
         gui_status("Mark the games to update first: click them in the list");
         return;
@@ -827,7 +900,7 @@ static void do_update(void)
     log = engine_open_log();
     for (i = 0; i < e->n && !G.stop; i++) {
         Game *g = e->games[i];
-        if (!g->marked)
+        if (!g->marked || !g->path)
             continue;
         if (k++)
             Delay(100);               /* go easy on the server */
@@ -864,7 +937,7 @@ static void do_remove(void)
     for (i = 0; i < e->n; i++)
         n += e->games[i]->doomed;
     if (!n) {
-        gui_status("Show Not wanted, mark the games to remove there, then Remove marked");
+        gui_status("Show Not wanted, Won't run here or Duplicates, mark the games to remove, then Remove marked");
         return;
     }
     snprintf(body, sizeof(body), "Remove %ld game%s?\n\nDelete: the drawers and their icons are\n"
@@ -900,10 +973,277 @@ static void do_remove(void)
     if (log)
         Close(log);
     set_busy(0);
+    engine_dupes(e);              /* a group of two with one gone is no group */
     rebuild_list();
     set_summary();
     say("%ld %s%s%ld failed. Log: %s", done, how == 1 ? "deleted" : "moved to WHDUpdate-Old",
         G.stop ? " (stopped), " : ", ", failed, LOGFILE);
+}
+
+/* Which of the drawers in the settings g is under: 0 = the first (your
+ * main collection), 1 the next ...; 99 = none of them. */
+static int drawer_rank(const Game *g)
+{
+    const char *d = G.e->prefs.dirs[g->family < 0 ? FAM_GAMES : g->family];
+    int rank = 0;
+    while (*d) {
+        const char *e = strchr(d, ';');
+        int l = e ? (int)(e - d) : (int)strlen(d), i;
+        while (l && d[l - 1] == ' ')
+            l--;
+        while (*d == ' ' && l)
+            d++, l--;
+        for (i = 0; i < l; i++) {
+            char a = d[i], b = g->path[i];
+            if ((a >= 'A' && a <= 'Z' ? a | 32 : a) != (b >= 'A' && b <= 'Z' ? b | 32 : b))
+                break;
+        }
+        if (l && i == l && (g->path[l] == '/' || g->path[l - 1] == ':'))
+            return rank;
+        if (!e)
+            break;
+        d = e + 1;
+        rank++;
+    }
+    return 99;
+}
+
+/* Of a group of copies: is a a better one to keep than b? The newer
+ * version, then the one with more saves, then the one that is current,
+ * then the one in the drawer that comes first in the settings. */
+static int better_copy(const Game *a, const Game *b)
+{
+    int c = version_cmp(a->installed, b->installed);
+    if (c == 1 || c == -1)
+        return c > 0;
+    if (a->saves != b->saves)
+        return a->saves > b->saves;
+    if ((a->status == M_CURRENT) != (b->status == M_CURRENT))
+        return a->status == M_CURRENT;
+    return drawer_rank(a) < drawer_rank(b);
+}
+
+/* Mark all under Duplicates: every copy but the best one of each group. */
+static void mark_extras(void)
+{
+    Engine *e = G.e;
+    long i = 0, j, n = 0;
+    while (i < e->ndup) {
+        long keep = i;
+        for (j = i + 1; j < e->ndup && e->dupord[j]->dupe == e->dupord[i]->dupe; j++)
+            if (better_copy(e->dupord[j], e->dupord[keep]))
+                keep = j;
+        for (; i < j; i++) {
+            Game *g = e->dupord[i];
+            if (!shown(g))
+                continue;
+            g->doomed = i != keep;
+            n += g->doomed;
+        }
+    }
+    rebuild_list();
+    marks_changed("the extra copies (kept: newest, most saves, first drawer)");
+    (void)n;
+}
+
+/* Duplicates shown: the groups, and each copy's saves, once per check. */
+static void show_dupes(void)
+{
+    Engine *e = G.e;
+    long i;
+    if (!G.dupes_known) {
+        engine_dupes(e);
+        G.dupes_known = 1;
+    }
+    set_busy(1);
+    for (i = 0; i < e->ndup && !gui_poll(); i++) {
+        if (e->dupord[i]->saves < 0) {
+            if (!(i & 7))
+                busy("Counting the saves of the copies... %ld of %ld", i, e->ndup);
+            engine_count_saves(e->dupord[i]);
+        }
+    }
+    set_busy(0);
+    say(e->ndup ? "Copies of one game, with where they are and their saves (sv). Mark all marks "
+                  "all but the best of each" : "No game is there twice");
+}
+
+/* Install the games marked under Missing, each into its family's first
+ * drawer in the settings (its letter drawer there, when it has them). */
+static void do_install(void)
+{
+    Engine *e = G.e;
+    struct EasyStruct es;
+    char body[400], dest[400];
+    long i, n = 0, k = 0, done = 0, failed = 0;
+    BPTR log;
+
+    for (i = 0; i < e->n; i++)
+        n += e->games[i]->marked && e->games[i]->status == M_MISSING;
+    if (!n) {
+        gui_status("Show Missing, mark the games to install, then Install marked");
+        return;
+    }
+    engine_family_dir(e, FAM_GAMES, dest, sizeof(dest));
+    snprintf(body, sizeof(body), "Install %ld game%s?\n\nGames go into %s\n(into its A, B ... 0-9 drawers "
+             "when it has them);\ndemos and magazines into their own drawers\nfrom the settings.",
+             n, n == 1 ? "" : "s", dest[0] ? dest : "(no drawer set!)");
+    memset(&es, 0, sizeof(es));
+    es.es_StructSize = sizeof(es);
+    es.es_Title = (UBYTE *)"WHDUpdate";
+    es.es_TextFormat = (UBYTE *)body;
+    es.es_GadgetFormat = (UBYTE *)"Install|Cancel";
+    if (!EasyRequestArgs(G.win, &es, NULL, NULL))
+        return;
+    set_busy(1);
+    detach_list();
+    new_list(&G.list);            /* installed games become new entries */
+    G.sel = NULL;
+    log = engine_open_log();
+    for (i = 0; i < e->n && !G.stop; i++) {
+        Game *g = e->games[i];
+        if (!g->marked || g->status != M_MISSING)
+            continue;
+        engine_family_dir(e, g->family, dest, sizeof(dest));
+        if (!dest[0]) {
+            say("No drawer set for %s: Settings, or the Drawers field", pack_sets[g->pack->set].label);
+            g->marked = 0;
+            failed++;
+            continue;
+        }
+        if (k++)
+            Delay(100);               /* go easy on the server */
+        say("(%ld/%ld) %s %s", k, n, g->name, g->pack->ver);
+        switch (engine_install(e, i, dest, log)) {
+        case 0: done++; break;
+        case -2: break;
+        default: failed++; g->marked = 0;
+        }
+    }
+    if (log)
+        Close(log);
+    set_busy(0);
+    G.dupes_known = 0;
+    rebuild_list();
+    set_summary();
+    say("%ld installed%s%ld failed. Log: %s", done, G.stop ? " (stopped), " : ", ", failed, LOGFILE);
+}
+
+/* Save list as CSV: the games the list shows, in a file picked with the
+ * ASL requester (RAM:WHDUpdate.csv to start with). */
+static void do_export(void)
+{
+    struct FileRequester *fr;
+    char path[300];
+    BPTR fh;
+    if (!AslBase && !(AslBase = OpenLibrary((STRPTR)"asl.library", 37))) {
+        gui_status("Save list needs asl.library");
+        return;
+    }
+    fr = (struct FileRequester *)AllocAslRequestTags(ASL_FileRequest,
+            ASLFR_Window, (ULONG)G.win, ASLFR_TitleText, (ULONG)"Save the list as CSV",
+            ASLFR_InitialDrawer, (ULONG)"RAM:", ASLFR_InitialFile, (ULONG)"WHDUpdate.csv",
+            ASLFR_DoSaveMode, TRUE, TAG_END);
+    if (!fr)
+        return;
+    if (AslRequest(fr, NULL)) {
+        strncpy(path, (char *)fr->fr_Drawer, sizeof(path) - 1);
+        path[sizeof(path) - 1] = 0;
+        AddPart((STRPTR)path, fr->fr_File, sizeof(path));
+        if ((fh = Open((STRPTR)path, MODE_NEWFILE)) != 0) {
+            long i, n = 0;
+            engine_export(G.e, fh, shown);
+            Close(fh);
+            for (i = 0; i < G.e->n; i++)
+                n += shown(G.e->games[i]);
+            say("%ld game%s saved to %s", n, n == 1 ? "" : "s", path);
+        } else
+            say("Cannot write %s", path);
+    }
+    FreeAslRequest(fr);
+}
+
+/* Find Kickstart images: the ones the games need and DEVS:Kickstarts
+ * lacks, looked for by their CRC in a drawer picked with the ASL
+ * requester (an emulator's ROM folder, a disk from a PC ...), and copied
+ * into DEVS:Kickstarts under the name WHDLoad wants. The files found are
+ * left where they are. */
+static void do_kicks(void)
+{
+    static KickNeed need[16];
+    struct FileRequester *fr;
+    struct EasyStruct es;
+    char dir[300], body[1200];
+    int n, found = 0, i, o, copied = 0, nortb = 0;
+    long games = 0;
+
+    n = engine_kicks_needed(G.e, need, 16);
+    if (!n) {
+        gui_status(G.e->n ? "Every Kickstart image your games ask for is in DEVS:Kickstarts"
+                          : "Check first: the games say which Kickstart images they need");
+        return;
+    }
+    for (i = 0; i < n; i++)
+        games += need[i].games;
+    if (!AslBase && !(AslBase = OpenLibrary((STRPTR)"asl.library", 37))) {
+        gui_status("Find Kickstart images needs asl.library");
+        return;
+    }
+    fr = (struct FileRequester *)AllocAslRequestTags(ASL_FileRequest,
+            ASLFR_Window, (ULONG)G.win, ASLFR_TitleText, (ULONG)"Where are your Kickstart files?",
+            ASLFR_InitialDrawer, (ULONG)"SYS:", ASLFR_DrawersOnly, TRUE, TAG_END);
+    if (!fr)
+        return;
+    i = AslRequest(fr, NULL);
+    strncpy(dir, (char *)fr->fr_Drawer, sizeof(dir) - 1);
+    dir[sizeof(dir) - 1] = 0;
+    FreeAslRequest(fr);
+    if (!i || !dir[0])
+        return;
+    set_busy(1);
+    found = engine_find_kicks(dir, need, n);
+    set_busy(0);
+    if (found == -2) {
+        say("Stopped");
+        return;
+    }
+    if (!found) {
+        o = snprintf(body, sizeof(body), "None of the %d Kickstart image%s your games need\nis in %s.\n\nNeeded:",
+                     n, n == 1 ? "" : "s", dir);
+        for (i = 0; i < n && i < 10 && o < (int)sizeof(body) - 80; i++)
+            o += snprintf(body + o, sizeof(body) - o, "\nkick%s (%ld game%s)", need[i].name, need[i].games,
+                          need[i].games == 1 ? "" : "s");
+        es.es_GadgetFormat = (UBYTE *)"OK";
+    } else {
+        o = snprintf(body, sizeof(body), "Found under other names - copy them into\nDEVS:Kickstarts as WHDLoad wants them?\n");
+        for (i = 0; i < n && o < (int)sizeof(body) - 120; i++)
+            if (need[i].found[0])
+                o += snprintf(body + o, sizeof(body) - o, "\n%.60s\n  -> kick%s (%ld game%s)", need[i].found,
+                              need[i].name, need[i].games, need[i].games == 1 ? "" : "s");
+        if (found < n)
+            o += snprintf(body + o, sizeof(body) - o, "\n\n%d other%s not found.", n - found, n - found == 1 ? "" : "s");
+        es.es_GadgetFormat = (UBYTE *)"Copy|Cancel";
+    }
+    es.es_StructSize = sizeof(es);
+    es.es_Flags = 0;
+    es.es_Title = (UBYTE *)"WHDUpdate";
+    es.es_TextFormat = (UBYTE *)body;
+    if (!EasyRequestArgs(G.win, &es, NULL, NULL) || !found)
+        return;
+    for (i = 0; i < n; i++) {
+        int rtb = 1;
+        if (!need[i].found[0])
+            continue;
+        if (engine_copy_kick(&need[i], &rtb) == 0) {
+            copied++;
+            nortb += !rtb;
+        } else
+            say("Cannot copy %s to DEVS:Kickstarts", need[i].found);
+    }
+    rebuild_list();
+    set_summary();
+    say("%d Kickstart image%s copied to DEVS:Kickstarts%s", copied, copied == 1 ? "" : "s",
+        nortb ? "; some lack their .RTB file - it comes with WHDLoad" : "");
 }
 
 /* Mark all / Mark none: only the games the list shows (Find and Show), so a
@@ -912,12 +1252,18 @@ static void do_remove(void)
 static void mark_all(int on)
 {
     long i;
+    if (on && G.filter == SHOW_DUPES) {
+        mark_extras();
+        return;
+    }
     for (i = 0; i < G.e->n; i++) {
         Game *g = G.e->games[i];
         if (!shown(g))
             continue;
-        if (G.filter == SHOW_UNWANTED)
+        if (REMOVING())
             g->doomed = on;
+        else if (G.filter == SHOW_MISSING)
+            g->marked = on;
         else
             g->marked = on && g->status == M_UPDATE;
     }
@@ -1052,6 +1398,9 @@ static void do_menu(ULONG id, struct MenuItem *it)
     case MN_CHECK:  do_check(); break;
     case MN_UPDATE: do_update(); break;
     case MN_REMOVE: do_remove(); break;
+    case MN_INSTALL: do_install(); break;
+    case MN_EXPORT: do_export(); break;
+    case MN_KICKS: do_kicks(); break;
     case MN_ABOUT:  about(); break;
     case MN_QUIT:   G.quit = 1; break;
     case MN_FTPONLY:
@@ -1207,18 +1556,30 @@ int gui_main(struct Engine *e, const char *dirs)
                     }
                     break;
                 case G_SHOW: {
-                    int was = G.filter == SHOW_UNWANTED;
+                    /* the first button: Update / Install / Remove marked */
+                    int was = REMOVING() ? 2 : G.filter == SHOW_MISSING;
                     G.filter = code;
                     detach_list();
                     G.top = 0;                /* another list: from its top */
                     G.anchor = -1;
-                    if (was != (G.filter == SHOW_UNWANTED))
-                        relayout();           /* Update marked <-> Remove marked */
+                    if (G.filter == SHOW_CANTRUN)
+                        engine_machine(G.e);
+                    if (G.filter == SHOW_DUPES) {
+                        new_list(&G.list);    /* empty while the saves are counted */
+                        attach_list();
+                        show_dupes();
+                    }
+                    if (was != (REMOVING() ? 2 : G.filter == SHOW_MISSING))
+                        relayout();
                     else
                         rebuild_list();
                     set_summary();
                     if (G.filter == SHOW_UNWANTED)
                         gui_status("Games of a language or system turned off in Settings: mark, then Remove");
+                    else if (G.filter == SHOW_CANTRUN)
+                        gui_status("What each one needs that this machine lacks: mark, then Remove (or add the Kickstart)");
+                    else if (G.filter == SHOW_MISSING)
+                        gui_status("Packs of the sets in use you don't have: mark, then Install marked");
                     break;
                 }
                 case G_LIST: {
@@ -1250,7 +1611,7 @@ int gui_main(struct Engine *e, const char *dirs)
                     G.anchor = code;
                     G.press = -1;
                     if (g && markable(g)) {
-                        if (G.filter == SHOW_UNWANTED)
+                        if (REMOVING())
                             g->doomed = !g->doomed;
                         else
                             g->marked = !g->marked;
@@ -1265,8 +1626,10 @@ int gui_main(struct Engine *e, const char *dirs)
                     break;
                 }
                 case G_UPDATE:
-                    if (G.filter == SHOW_UNWANTED)
+                    if (REMOVING())
                         do_remove();
+                    else if (G.filter == SHOW_MISSING)
+                        do_install();
                     else
                         do_update();
                     break;
@@ -1309,6 +1672,8 @@ done:
         UnlockPubScreen(NULL, G.scr);
     if (GadToolsBase)
         CloseLibrary(GadToolsBase);
+    if (AslBase)
+        CloseLibrary(AslBase);
     if (GfxBase)
         CloseLibrary((struct Library *)GfxBase);
     if (IntuitionBase)

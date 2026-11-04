@@ -8,6 +8,8 @@
  *   ws_keydebug.b, ws_keyexit.b      (version 4+)
  *   ws_ExpMem.l                      (version 8+)
  *   ws_name.w, ws_copy.w, ws_info.w  (version 10+, offsets from the start)
+ *   ws_kickname.w, ws_kicksize.l, ws_kickcrc.w   (version 16+; a kickcrc of
+ *       $ffff makes ws_kickname a table of crc.w + name.w pairs, ended by 0)
  * The strings are NUL-terminated; ws_info uses $0a for a new line and $ff
  * for a line break that keeps going. Finding "WHDLOADS" is enough to locate
  * the start: it sits 4 bytes in, right after the hunk header. */
@@ -17,6 +19,7 @@
 #define OFS_NAME 0x24
 
 static unsigned get16(const unsigned char *p) { return (unsigned)p[0] << 8 | p[1]; }
+static unsigned long get32(const unsigned char *p) { return (unsigned long)get16(p) << 16 | get16(p + 2); }
 
 static int is_digit(int c) { return c >= '0' && c <= '9'; }
 
@@ -40,6 +43,28 @@ static void copy_clean(char *dst, int size, const unsigned char *src)
         dst[n++] = (c < 32 || c == 0xff) ? ' ' : (char)c;
     }
     dst[n] = 0;
+}
+
+/* Add the name at ofs, checked by crc, to the Kickstart list ('|' between names). */
+static void add_kick(SlaveInfo *out, const unsigned char *buf, long len, long ofs, unsigned crc)
+{
+    const unsigned char *s = str_at(buf, len, ofs);
+    int l = (int)strlen(out->kick), n = 0, i;
+    char one[48];
+    if (!s)
+        return;
+    copy_clean(one, sizeof(one), s);
+    if (!one[0] || l + (l ? 1 : 0) + (int)strlen(one) >= (int)sizeof(out->kick))
+        return;
+    for (i = 0; out->kick[i]; i++)
+        n += out->kick[i] == '|';
+    if (l) {
+        out->kick[l++] = '|';
+        n++;
+    }
+    strcpy(out->kick + l, one);
+    if (n < 4)
+        out->kickcrc[n] = (unsigned short)crc;
 }
 
 /* "Version 1.2", "version 2.06b", "V1.3" (only as a whole word). */
@@ -117,6 +142,23 @@ int slave_parse(const unsigned char *buf, long len, SlaveInfo *out)
     if (start < 0 || start + 0x2a > len)
         return 0;
     out->ws_version = (unsigned short)get16(buf + start + 12);
+    out->flags = (unsigned short)get16(buf + start + 14);
+    out->basemem = get32(buf + start + 16);
+    if (out->ws_version >= 8) {                   /* signed: negative = optional */
+        unsigned long v = get32(buf + start + 32);
+        out->expmem = v & 0x80000000UL ? -(long)((~v + 1) & 0xffffffffUL) : (long)v;
+    }
+    if (out->ws_version >= 16 && start + 0x32 <= len) {
+        const unsigned char *b = buf + start;
+        long tail = len - start, kn = (long)get16(b + 0x2a);
+        if (kn && get16(b + 0x30) != 0xffff)
+            add_kick(out, b, tail, kn, get16(b + 0x30));
+        else if (kn) {                            /* a table: any of these */
+            long t;
+            for (t = kn; t + 4 <= tail && get16(b + t); t += 4)
+                add_kick(out, b, tail, (long)get16(b + t + 2), get16(b + t));
+        }
+    }
     if (out->ws_version >= 10) {
         const unsigned char *s;
         long tail = len - start;

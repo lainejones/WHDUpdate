@@ -22,4 +22,13 @@ int update_game(const UpdateConf *c, const char *path, const Pack *p, const char
  * 0 = done, -1 = failed (said why). */
 int remove_game(BPTR log, const char *path, int keep);
 
+/* Install pack p into drawer dest - into its letter drawer there (A, B ...
+ * 0-9, by the first letter of name) when dest has those. The new drawer's
+ * path into path. 0 = installed, -1 = failed (said why), -2 = stopped. */
+int install_game(const UpdateConf *c, const char *dest, const char *name, const Pack *p,
+                 char *path, int size);
+
+/* How many save and high score files the drawer at path has. */
+int count_saves(const char *path);
+
 #endif

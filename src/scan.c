@@ -81,14 +81,16 @@ static const char *leaf(const char *path)
     return p;
 }
 
+int scan_errors;
+
 static int walk(const char *dir, int depth, game_fn fn, dir_fn known, void *ctx)
 {
     BPTR lock;
     struct FileInfoBlock *fib;
     char *subs = NULL, slave[108];
-    long subslen = 0, subscap = 0;
+    long subslen = 0, subscap = 0, err;
     GameFiles gf;
-    int rc = 0;
+    int rc = 0, tries = 0;
 
     if (break_pressed())
         return -2;
@@ -113,6 +115,7 @@ static int walk(const char *dir, int depth, game_fn fn, dir_fn known, void *ctx)
             }
         }
         gf.dir_date = fib->fib_Date;
+    relist:
         while (ExNext(lock, fib)) {
             const char *n = (const char *)fib->fib_FileName;
             if (fib->fib_DirEntryType < 0) {
@@ -141,6 +144,20 @@ static int walk(const char *dir, int depth, game_fn fn, dir_fn known, void *ctx)
                 memcpy(subs + subslen, n, l);
                 subslen += l;
             }
+        }
+        /* ExNext ends with "no more entries"; anything else (a read error
+         * the file system gave up on) cut the listing short: once more from
+         * the start, then say so - a short list must not pass for the whole */
+        err = IoErr();
+        if (err != ERROR_NO_MORE_ENTRIES) {
+            if (!tries++ && Examine(lock, fib)) {
+                slave[0] = 0;
+                subslen = 0;
+                gf.arc_size = -1;
+                goto relist;
+            }
+            scan_errors++;
+            say("Could not read all of %s (error %ld): some games may be left out", dir, err);
         }
     }
     FreeDosObject(DOS_FIB, fib);

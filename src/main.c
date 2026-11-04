@@ -190,6 +190,8 @@ static int cli(Engine *e, LONG *args)
 {
     Out out;
     int rc = RETURN_OK, depth = 3, stopped = 0;
+    const char *csvname = NULL;     /* REPORT=x.csv */
+    BPTR csvfh = 0;
 
     memset(&out, 0, sizeof(out));
     if (args[A_DEPTH])
@@ -200,11 +202,20 @@ static int cli(Engine *e, LONG *args)
     if (engine_dat(e, args[A_OFFLINE] != 0))
         return RETURN_FAIL;
     if (args[A_REPORT]) {
-        out.report = Open((STRPTR)args[A_REPORT], MODE_NEWFILE);
+        const char *rn = (const char *)args[A_REPORT];
+        int rl = (int)strlen(rn);
+        /* a name ending in .csv: every game as CSV, written after the scan */
+        csvname = rl > 4 && rn[rl - 4] == '.' && (rn[rl - 3] | 32) == 'c' && (rn[rl - 2] | 32) == 's' &&
+                  (rn[rl - 1] | 32) == 'v' ? rn : NULL;
+        out.report = Open((STRPTR)rn, MODE_NEWFILE);
         if (!out.report)
-            printf("Cannot write %s\n", (char *)args[A_REPORT]);
-        else
+            printf("Cannot write %s\n", rn);
+        else if (!csvname)
             FPuts(out.report, (STRPTR)"status\tdrawer\tinstalled\tnewest\tpack\tfolder\n");
+        else {
+            csvfh = out.report;
+            out.report = 0;
+        }
     }
     if (args[A_ALL]) {
         stopped = engine_scan(e, "ALL", depth, -1) == -2;
@@ -220,8 +231,15 @@ static int cli(Engine *e, LONG *args)
     }
     if (out.report)
         Close(out.report);
+    if (csvfh) {
+        engine_export(e, csvfh, NULL);
+        Close(csvfh);
+    }
     if (stopped)
         printf("*** Stopped.\n");
+    if (scan_errors)
+        printf("*** %d drawer%s could not be read completely (read errors): some games are left out.\n",
+               scan_errors, scan_errors == 1 ? "" : "s");
     printf("\n%ld games: %ld up to date, %ld with an update, %ld to check by hand,\n"
            "%ld without a version in the slave, %ld not in the pack list, %ld newer than the pack.\n",
            e->n, e->st[M_CURRENT], e->st[M_UPDATE], e->st[M_CHECK],
