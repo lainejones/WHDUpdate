@@ -18,6 +18,7 @@
  *   WHDUpdate Games: UPDATE     update the games with a newer pack, asking
  *                               for each one (YES: without asking)
  *   WHDUpdate Games: GAME=Lotus#?   only the games whose drawer name fits
+ *   WHDUpdate Games: RESCAN     forget the scan cache: read every drawer again
  *   WHDUpdate GUI               the window
  *
  * Return code 5 (WARN) when there are updates, 0 when there are none. */
@@ -42,9 +43,9 @@ static const char verstag[] __attribute__((used)) =
 struct Library *SocketBase = NULL;
 struct Library *IconBase = NULL;
 
-#define TEMPLATE "DIR/M,ALL/S,UPDATE/S,YES/S,GAME/K,SHOWALL/S,REPORT/K,OFFLINE/S,FTP/S,DEPTH/K/N,GUI/S"
+#define TEMPLATE "DIR/M,ALL/S,UPDATE/S,YES/S,GAME/K,SHOWALL/S,REPORT/K,OFFLINE/S,FTP/S,DEPTH/K/N,GUI/S,RESCAN/S"
 enum { A_DIR, A_ALL, A_UPDATE, A_YES, A_GAME, A_SHOWALL, A_REPORT, A_OFFLINE, A_FTP, A_DEPTH,
-       A_GUI, A_COUNT };
+       A_GUI, A_RESCAN, A_COUNT };
 
 static int gui_on;
 
@@ -229,6 +230,10 @@ static int cli(Engine *e, LONG *args)
     e->seen_ctx = &out;
     if (engine_dat(e, args[A_OFFLINE] != 0))
         return RETURN_FAIL;
+    if (args[A_RESCAN]) {
+        engine_forget_cache(e);
+        printf("Scan cache forgotten: every drawer is read again.\n");
+    }
     if (args[A_REPORT]) {
         const char *rn = (const char *)args[A_REPORT];
         int rl = (int)strlen(rn);

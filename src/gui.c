@@ -67,11 +67,12 @@ static const char *set_labels[] = {"All sets", "Games", "Games Beta", "Demos", "
                                    "Magazines", NULL};
 
 enum { MN_CHECK = 1, MN_UPDATE, MN_ABOUT, MN_QUIT, MN_SERVER, MN_SETS, MN_LANG, MN_SYS, MN_FTPONLY,
-       MN_REMOVE, MN_INSTALL, MN_EXPORT, MN_KICKS, MN_UNDO, MN_SAVES };
+       MN_REMOVE, MN_INSTALL, MN_EXPORT, MN_KICKS, MN_UNDO, MN_SAVES, MN_RESCAN };
 
 static struct NewMenu menu_def[] = {
     {NM_TITLE, (STRPTR)"Project", NULL, 0, 0, NULL},
     {NM_ITEM, (STRPTR)"Check", (STRPTR)"C", 0, 0, (APTR)MN_CHECK},
+    {NM_ITEM, (STRPTR)"Check from scratch", (STRPTR)"F", 0, 0, (APTR)MN_RESCAN},
     {NM_ITEM, (STRPTR)"Update marked", (STRPTR)"U", 0, 0, (APTR)MN_UPDATE},
     {NM_ITEM, (STRPTR)"Remove marked...", (STRPTR)"R", 0, 0, (APTR)MN_REMOVE},
     {NM_ITEM, (STRPTR)"Install marked...", (STRPTR)"I", 0, 0, (APTR)MN_INSTALL},
@@ -1529,6 +1530,11 @@ static void do_menu(ULONG id, struct MenuItem *it)
 {
     switch (id) {
     case MN_CHECK:  do_check(); break;
+    case MN_RESCAN:                   /* every drawer and slave read again */
+        engine_forget_cache(G.e);
+        gui_status("Scan cache forgotten: every drawer is read again");
+        do_check();
+        break;
     case MN_UPDATE: do_update(); break;
     case MN_REMOVE: do_remove(); break;
     case MN_INSTALL: do_install(); break;

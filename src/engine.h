@@ -102,6 +102,9 @@ void engine_free(Engine *e);
 int  engine_dat(Engine *e, int offline);
 
 void engine_clear(Engine *e);
+/* Forget the scan cache (and delete PROGDIR:Cache/games.txt): the next scan
+ * lists every drawer and reads every slave again. */
+void engine_forget_cache(Engine *e);
 /* Add the games under root (or every volume for "ALL"), matched against
  * the sets in use of family fam (-1: all of them). 0 = done, -1 = no such
  * drawer, -2 = stopped. */

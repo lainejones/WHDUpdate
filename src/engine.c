@@ -614,6 +614,12 @@ static void cache_save(Engine *e)
     Close(fh);
 }
 
+void engine_forget_cache(Engine *e)
+{
+    cache_free(e);
+    DeleteFile((STRPTR)SCANCACHE);
+}
+
 static void cache_free(Engine *e)
 {
     struct ScanCache *c = e->cache;

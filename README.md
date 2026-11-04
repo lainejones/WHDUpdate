@@ -11,6 +11,7 @@ WHDUpdate Games: SHOWALL             list every game, not just the ones to look 
 WHDUpdate Games: REPORT=RAM:whd.txt  also write a full tab-separated list
 WHDUpdate Games: REPORT=RAM:whd.csv  ... or every game as CSV (see Save list as CSV)
 WHDUpdate Games: OFFLINE             use the pack list already saved
+WHDUpdate Games: RESCAN              forget the scan cache: read every drawer and slave again
 WHDUpdate Games: FTP                 fetch the pack list by FTP
 WHDUpdate Games: UPDATE              update the games with a newer pack, asking for each
 WHDUpdate Games: UPDATE YES          ... without asking
@@ -34,7 +35,8 @@ are remembered (in `ENVARC:WHDUpdate.prefs` with the other settings, saved when
 you press Check and when the window closes), and the next start checks right away.
 What a check read from each game drawer is kept in `PROGDIR:Cache/games.txt` with the
 drawer's date, so the next check looks inside a drawer again only when something in it
-was added, replaced or removed.
+was added, replaced or removed. **Project > Check from scratch** forgets it and reads every
+drawer and slave again - after a disk problem, or when games were copied in with their old dates.
 
 ### Saving the list
 
