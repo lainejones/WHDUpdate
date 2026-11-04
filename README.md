@@ -44,7 +44,8 @@ menu). It asks first, and offers two ways:
 
 - **Delete**: the game drawers and their icons are deleted for good.
 - **Move**: they go to `<volume>:WHDUpdate-Old/`, like an updated game's old copy. That is
-  quick, but frees no room until you delete them from there.
+  quick, but frees no room until you delete them from there. The drawer gets the default
+  drawer icon, so Workbench shows it in the volume's window.
 
 Each removal is written to `PROGDIR:WHDUpdate.log`. The marks under Not wanted are kept
 apart from the update marks, so marking games to update never removes them.

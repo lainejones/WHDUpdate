@@ -73,6 +73,25 @@ static int make_dir(const char *path)
     return l != 0;
 }
 
+/* WHDUpdate-Old, with a drawer icon so Workbench shows it: the default
+ * drawer icon (ENV:Sys/def_drawer.info when there is one, on OS 3.5+),
+ * placed by Workbench. A drawer made by an older version gets one too. */
+static int make_old_dir(const char *path)
+{
+    char info[P];
+    struct DiskObject *dob;
+    if (!make_dir(path))
+        return 0;
+    snprintf(info, sizeof(info), "%s.info", path);
+    if (IconBase && !exists(info) && (dob = GetDefDiskObject(WBDRAWER)) != NULL) {
+        dob->do_CurrentX = NO_ICON_POSITION;
+        dob->do_CurrentY = NO_ICON_POSITION;
+        PutDiskObject((STRPTR)path, dob);
+        FreeDiskObject(dob);
+    }
+    return 1;
+}
+
 /* Run an AmigaDOS command quietly, in drawer dir (NULL: here); its return code. */
 static LONG run_in(const char *dir, const char *cmd)
 {
@@ -539,7 +558,7 @@ int remove_game(BPTR log, const char *path, int keep)
         memcpy(vol, path, colon + 1 - path);
         vol[colon + 1 - path] = 0;
         cat_path(olddir, vol, OLDDIR);
-        if (!make_dir(olddir)) {
+        if (!make_old_dir(olddir)) {
             say("  cannot make %s", olddir);
             return -1;
         }
@@ -583,7 +602,7 @@ int update_game(const UpdateConf *c, const char *path, const Pack *p, const char
     vol[colon + 1 - path] = 0;
     cat_path(olddir, vol, OLDDIR);
     cat_path(work, olddir, ".work");
-    if (!make_dir(olddir)) {
+    if (!make_old_dir(olddir)) {
         say("  cannot make %s", olddir);
         return -1;
     }
