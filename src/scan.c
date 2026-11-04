@@ -81,7 +81,7 @@ static const char *leaf(const char *path)
     return p;
 }
 
-static int walk(const char *dir, int depth, game_fn fn, void *ctx)
+static int walk(const char *dir, int depth, game_fn fn, dir_fn known, void *ctx)
 {
     BPTR lock;
     struct FileInfoBlock *fib;
@@ -104,6 +104,15 @@ static int walk(const char *dir, int depth, game_fn fn, void *ctx)
     memset(&gf, 0, sizeof(gf));
     gf.arc_size = -1;
     if (Examine(lock, fib) && fib->fib_DirEntryType > 0) {
+        if (known) {
+            int k = known(ctx, dir, leaf(dir), &fib->fib_Date);
+            if (k) {                                  /* dealt with, or stop */
+                FreeDosObject(DOS_FIB, fib);
+                UnLock(lock);
+                return k < 0 ? -2 : 0;
+            }
+        }
+        gf.dir_date = fib->fib_Date;
         while (ExNext(lock, fib)) {
             const char *n = (const char *)fib->fib_FileName;
             if (fib->fib_DirEntryType < 0) {
@@ -144,7 +153,7 @@ static int walk(const char *dir, int depth, game_fn fn, void *ctx)
         char *path = (char *)malloc(PATHMAX), *s;
         for (s = subs; path && s < subs + subslen && rc != -2; s += strlen(s) + 1) {
             join(path, dir, s);
-            if (path[0] && walk(path, depth - 1, fn, ctx) == -2)
+            if (path[0] && walk(path, depth - 1, fn, known, ctx) == -2)
                 rc = -2;
         }
         free(path);
@@ -153,13 +162,13 @@ static int walk(const char *dir, int depth, game_fn fn, void *ctx)
     return rc;
 }
 
-int scan_tree(const char *root, int depth, game_fn fn, void *ctx)
+int scan_tree(const char *root, int depth, game_fn fn, dir_fn known, void *ctx)
 {
     BPTR l = Lock((STRPTR)root, ACCESS_READ);
     if (!l)
         return -1;
     UnLock(l);
-    return walk(root, depth, fn, ctx);
+    return walk(root, depth, fn, known, ctx);
 }
 
 char *volume_list(void)

@@ -380,12 +380,16 @@ int engine_dat(Engine *e, int offline)
  * next check reads a drawer again only when those changed. One line a
  * drawer, tab-separated: path, slave, slave size, its date (3 numbers),
  * parsed (0/1), ws_version, name, version, date, archive size (-1 = no
- * file), its date (3 numbers), archive name. The pack matching is redone
- * every time, so a new pack list needs no new scan. */
+ * file), its date (3 numbers), archive name, and the drawer's own date (3
+ * numbers; older lines lack it). A drawer whose date is unchanged is not
+ * even listed: one Examine instead of a listing and two file reads. The
+ * pack matching is redone every time, so a new pack list needs no new
+ * scan. */
 #define SCANCACHE CACHEDIR "/games.txt"
 
 typedef struct {
     char *path, *slave;
+    struct DateStamp dd;    /* the drawer's date when it was read (0 = unknown) */
     long size;
     struct DateStamp ds;
     int ok;
@@ -480,13 +484,13 @@ static void cache_load(Engine *e)
     if (!buf)
         return;
     for (line = (char *)buf; line && *line; line = next) {
-        char *p = line, *f[16];
+        char *p = line, *f[19];
         CacheEntry *ce;
         int i;
         next = strchr(line, '\n');
         if (next)
             *next++ = 0;
-        for (i = 0; i < 16; i++)
+        for (i = 0; i < 19; i++)
             f[i] = field(&p);
         if (!f[15] || !f[0][0] || !f[1][0])
             continue;
@@ -505,6 +509,9 @@ static void cache_load(Engine *e)
         ce->asize = atol(f[11]);
         ce->ads.ds_Days = atol(f[12]); ce->ads.ds_Minute = atol(f[13]); ce->ads.ds_Tick = atol(f[14]);
         set_str(ce->arc, sizeof(ce->arc), f[15]);
+        if (f[18]) {
+            ce->dd.ds_Days = atol(f[16]); ce->dd.ds_Minute = atol(f[17]); ce->dd.ds_Tick = atol(f[18]);
+        }
         if (!ce->path || !ce->slave) {
             free(ce->path);
             free(ce->slave);
@@ -536,11 +543,12 @@ static void cache_save(Engine *e)
     for (i = 0; i < c->n; i++) {
         const CacheEntry *ce = &c->e[i];
         char line[1024];
-        int n = snprintf(line, sizeof(line), "%s\t%s\t%ld\t%ld\t%ld\t%ld\t%d\t%u\t%s\t%s\t%s\t%ld\t%ld\t%ld\t%ld\t%s\n",
+        int n = snprintf(line, sizeof(line), "%s\t%s\t%ld\t%ld\t%ld\t%ld\t%d\t%u\t%s\t%s\t%s\t%ld\t%ld\t%ld\t%ld\t%s\t%ld\t%ld\t%ld\n",
                          ce->path, ce->slave, ce->size, (long)ce->ds.ds_Days, (long)ce->ds.ds_Minute,
                          (long)ce->ds.ds_Tick, ce->ok, (unsigned)ce->si.ws_version, ce->si.name,
                          ce->si.version, ce->si.date, ce->asize, (long)ce->ads.ds_Days,
-                         (long)ce->ads.ds_Minute, (long)ce->ads.ds_Tick, ce->arc);
+                         (long)ce->ads.ds_Minute, (long)ce->ads.ds_Tick, ce->arc,
+                         (long)ce->dd.ds_Days, (long)ce->dd.ds_Minute, (long)ce->dd.ds_Tick);
         if (n <= 0 || n >= (int)sizeof(line))
             continue;
         if (Write(fh, line, n) != n)
@@ -608,6 +616,7 @@ static void cache_put(Engine *e, CacheEntry *ce, const char *slave, const GameFi
     if (ce->slave)
         free(ce->slave);
     ce->slave = sl;
+    ce->dd = gf->dir_date;
     ce->size = gf->slave_size;
     ce->ds = gf->slave_date;
     ce->ok = ok;
@@ -692,34 +701,16 @@ static void installed_pack(Engine *e, const char *name, Match *m)
         }
 }
 
-static int on_game(void *ctx, const char *path, const char *name, const char *slave, const GameFiles *gf)
+/* A game drawer whose facts are known (read, or from the cache): match it
+ * and add it to the list. */
+static int add_found(Engine *e, const char *path, const char *name, const char *slave,
+                     const SlaveInfo *si, const char *arc)
 {
-    Engine *e = (Engine *)ctx;
-    SlaveInfo si;
     Match m;
     Game *g;
-    CacheEntry *ce, *slot;
-    char arc[120];
     long pl = (long)strlen(path);
 
-    if (e->pattern && !MatchPatternNoCase((STRPTR)e->pattern, (STRPTR)name))
-        return break_pressed();
-    ce = cache_find(e, path, slave, gf, &slot);
-    if (ce) {                                     /* the drawer as it was: no file to read */
-        if (ce->ok)
-            si = ce->si;
-        else
-            memset(&si, 0, sizeof(si));
-        set_str(arc, sizeof(arc), ce->arc);
-    } else {
-        int ok = read_slave(e, path, slave, &si);
-        if (!ok)
-            memset(&si, 0, sizeof(si));
-        if (gf->arc_size < 0 || !read_archive_name(path, arc, sizeof(arc)))
-            arc[0] = 0;
-        cache_put(e, slot, slave, gf, ok, &si, arc);
-    }
-    match_game(&e->ix, name, slave, &si, &m);
+    match_game(&e->ix, name, slave, si, &m);
     installed_pack(e, arc, &m);
 
     if (e->n == e->cap) {
@@ -750,6 +741,60 @@ static int on_game(void *ctx, const char *path, const char *name, const char *sl
     return break_pressed();
 }
 
+static int on_game(void *ctx, const char *path, const char *name, const char *slave, const GameFiles *gf)
+{
+    Engine *e = (Engine *)ctx;
+    SlaveInfo si;
+    CacheEntry *ce, *slot;
+    char arc[120];
+
+    if (e->pattern && !MatchPatternNoCase((STRPTR)e->pattern, (STRPTR)name))
+        return break_pressed();
+    ce = cache_find(e, path, slave, gf, &slot);
+    if (ce) {                                     /* the drawer as it was: no file to read */
+        if (ce->ok)
+            si = ce->si;
+        else
+            memset(&si, 0, sizeof(si));
+        set_str(arc, sizeof(arc), ce->arc);
+        if (!same_date(&ce->dd, &gf->dir_date)) {  /* the listing was needed: keep the new date */
+            ce->dd = gf->dir_date;
+            e->cache->dirty = 1;
+        }
+    } else {
+        int ok = read_slave(e, path, slave, &si);
+        if (!ok)
+            memset(&si, 0, sizeof(si));
+        if (gf->arc_size < 0 || !read_archive_name(path, arc, sizeof(arc)))
+            arc[0] = 0;
+        cache_put(e, slot, slave, gf, ok, &si, arc);
+    }
+    return add_found(e, path, name, slave, &si, arc);
+}
+
+/* Before a drawer is listed: a game drawer in the cache whose own date has
+ * not changed is taken from the cache without a listing. */
+static int on_dir(void *ctx, const char *path, const char *name, const struct DateStamp *date)
+{
+    Engine *e = (Engine *)ctx;
+    struct ScanCache *c = e->cache;
+    CacheEntry *ce;
+    SlaveInfo si;
+
+    if (!c || !c->sorted || !date->ds_Days)
+        return 0;
+    ce = cache_search(c->e, c->sorted, path);
+    if (!ce || !ce->dd.ds_Days || !same_date(&ce->dd, date))
+        return 0;
+    if (e->pattern && !MatchPatternNoCase((STRPTR)e->pattern, (STRPTR)name))
+        return break_pressed() ? -1 : 1;
+    if (ce->ok)
+        si = ce->si;
+    else
+        memset(&si, 0, sizeof(si));
+    return add_found(e, path, name, ce->slave, &si, ce->arc) ? -1 : 1;
+}
+
 static unsigned long family_sets(const Engine *e, int fam)
 {
     unsigned long bits = 0;
@@ -776,11 +821,11 @@ int engine_scan(Engine *e, const char *root, int depth, int fam)
             if (w < v)
                 continue;                     /* the same name twice */
             say("Looking through %s", v);
-            rc = scan_tree(v, depth, on_game, e) == -2 ? -2 : 0;
+            rc = scan_tree(v, depth, on_game, on_dir, e) == -2 ? -2 : 0;
         }
         free(vols);
     } else
-        rc = scan_tree(root, depth, on_game, e);
+        rc = scan_tree(root, depth, on_game, on_dir, e);
     cache_save(e);                            /* also after a stop: what was read stays read */
     return rc;
 }

@@ -38,6 +38,7 @@ void url_decode(const char *in, char *out, int size);
  * the slave, and ArchiveName.txt if there is one (arc_size -1 = none). With
  * these the scan cache can tell an unchanged drawer without opening a file. */
 typedef struct {
+    struct DateStamp dir_date;   /* the game drawer's own date */
     long slave_size;
     struct DateStamp slave_date;
     long arc_size;
@@ -49,10 +50,17 @@ typedef struct {
 typedef int (*game_fn)(void *ctx, const char *path, const char *name,
                        const char *slave, const GameFiles *files);
 
+/* Asked before a drawer is listed, with the drawer's own date (it changes
+ * whenever a file in it is added, replaced or removed). 1 = the caller
+ * already knows this drawer as it is and has dealt with it: do not list it;
+ * 0 = list it; -1 = stop. May be NULL. */
+typedef int (*dir_fn)(void *ctx, const char *path, const char *name,
+                      const struct DateStamp *date);
+
 /* Look through root (and its drawers, down to depth levels) for game
  * drawers: drawers with a WHDLoad slave in them. 0 = done, -1 = root not
  * found, -2 = stopped (Ctrl-C or the callback). */
-int scan_tree(const char *root, int depth, game_fn fn, void *ctx);
+int scan_tree(const char *root, int depth, game_fn fn, dir_fn known, void *ctx);
 
 /* Every mounted volume except RAM:, as "Name:" strings in one block
  * separated by NULs and ended by an empty one; free() it. */

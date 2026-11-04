@@ -27,9 +27,9 @@ the updates, all games, the ones to check by hand, the ones not found, or the on
 slave has no version. **Stop** ends a check or the updates between two steps. The drawers
 are remembered (in `ENVARC:WHDUpdate.prefs` with the other settings, saved when
 you press Check and when the window closes), and the next start checks right away.
-What a check read from each game drawer is kept in `PROGDIR:Cache/games.txt`, so the
-next check reads a drawer again only when its slave or `ArchiveName.txt` changed:
-the first check of 2,600 games takes an A500 ten minutes, the second well under one.
+What a check read from each game drawer is kept in `PROGDIR:Cache/games.txt` with the
+drawer's date, so the next check looks inside a drawer again only when something in it
+was added, replaced or removed.
 
 The window is laid out from the screen font and fits a 640x200 NTSC screen with Topaz 8;
 when the screen font is too big for the screen, it uses Topaz 8. The list always uses the
