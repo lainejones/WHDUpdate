@@ -405,6 +405,7 @@ typedef struct {
     struct DateStamp ads;
     char arc[120];
     int req;                /* si has the flags, memory and Kickstart: 2 = with its CRCs */
+    long seq;               /* its line in the file: the later of two twins is the newer */
 } CacheEntry;
 
 struct ScanCache {
@@ -416,13 +417,19 @@ struct ScanCache {
 /* Shell sort: no recursion (the library's qsort recurses once per entry on
  * an ordered list, and this list comes back from the file in order - 2,600
  * levels blew the 32 KB stack). */
+static int cache_cmp(const CacheEntry *a, const CacheEntry *b)
+{
+    int c = strcmp(a->path, b->path);
+    return c ? c : a->seq < b->seq ? -1 : a->seq > b->seq;
+}
+
 static void cache_sort(CacheEntry *e, long n)
 {
     long gap, i, j;
     for (gap = n / 2; gap > 0; gap /= 2)
         for (i = gap; i < n; i++) {
             CacheEntry t = e[i];
-            for (j = i; j >= gap && strcmp(e[j - gap].path, t.path) > 0; j -= gap)
+            for (j = i; j >= gap && cache_cmp(&e[j - gap], &t) > 0; j -= gap)
                 e[j] = e[j - gap];
             e[j] = t;
         }
@@ -505,6 +512,7 @@ static void cache_load(Engine *e)
         ce = cache_add(c);
         if (!ce)
             break;
+        ce->seq = c->n;
         ce->path = strdup(f[0]);
         ce->slave = strdup(f[1]);
         ce->size = atol(f[2]);
@@ -546,6 +554,22 @@ static void cache_load(Engine *e)
     }
     free(buf);
     cache_sort(c->e, c->n);
+    /* One entry per drawer: caches up to 0.9 could hold two lines for one
+     * (an entry added during a run was not looked for again), and the
+     * lookup could land on the stale one. The later line is the newer. */
+    {
+        long i, o = 0;
+        for (i = 0; i < c->n; i++) {
+            if (o && !strcmp(c->e[o - 1].path, c->e[i].path)) {
+                free(c->e[o - 1].path);
+                free(c->e[o - 1].slave);
+                c->e[o - 1] = c->e[i];
+                c->dirty = 1;
+            } else
+                c->e[o++] = c->e[i];
+        }
+        c->n = o;
+    }
     c->sorted = c->n;
 }
 
