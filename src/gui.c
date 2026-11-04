@@ -27,6 +27,7 @@
 #include <graphics/text.h>
 #include <graphics/gfxbase.h>
 #include <devices/inputevent.h>
+#include <utility/hooks.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <proto/intuition.h>
@@ -97,6 +98,11 @@ static struct {
     struct IBox lvbox;            /* where the list is in the window */
     long anchor;                  /* the row clicked last: Shift-click marks from it */
     long press;                   /* the row the button went down on (-1 none, -2 not the list) */
+    long dragrow;                 /* the row a drag is over, as the status line says */
+    struct Hook lvhook;           /* draws the list's rows (list_draw) */
+    UWORD pens[4];                /* text, background, fill, fill text: for paint_rows */
+    int painted;                  /* paint_rows has drawn a drag's run over the list */
+    long pvtop;                   /* the list's top when it did */
     char dirs[400], status[200], summary[120];
     char find[40];                /* part of a name: only those games are shown */
     struct Menu *menu;
@@ -213,6 +219,56 @@ static void make_label(Game *g)
     g->node.ln_Name = g->label;
 }
 
+/* One row of the list, for GadTools (GTLV_CallBack): a marked game is
+ * drawn in the highlight colours, like the clicked one, so a run marked by
+ * a drag or a Shift-click shows as one block. */
+/* The rows paint_rows drew, and how: GadTools redraws the row under the
+ * pointer during a drag, and draws it the same way from here, or the two
+ * would flicker against each other. */
+#define PV_ROWS 64
+static Game *pvgame[PV_ROWS];
+static UBYTE pvlit[PV_ROWS];
+static int pvn;
+
+static void draw_row(struct RastPort *rp, UWORD bg, UWORD fg, WORD x0, WORD y0, WORD x1, WORD y1,
+                     const char *t)
+{
+    struct TextExtent te;
+    ULONG fit;
+    SetDrMd(rp, JAM1);
+    SetAPen(rp, bg);
+    RectFill(rp, x0, y0, x1, y1);
+    /* 2 pixels in, where GadTools' own rows start */
+    fit = TextFit(rp, (STRPTR)t, strlen(t), &te, NULL, 1, x1 - x0 - 1, 32767);
+    SetAPen(rp, fg);
+    Move(rp, x0 + 2, y0 + rp->TxBaseline);
+    Text(rp, (STRPTR)t, fit);
+}
+
+static ULONG list_draw(struct Hook *h __asm("a0"), struct Node *nd __asm("a2"),
+                       struct LVDrawMsg *m __asm("a1"))
+{
+    UWORD *pens;
+    int hi;
+    (void)h;
+    if (m->lvdm_MethodID != LV_DRAW)
+        return LVCB_UNKNOWN;
+    pens = m->lvdm_DrawInfo->dri_Pens;
+    hi = is_marked((Game *)nd) || m->lvdm_State == LVR_SELECTED;
+    if (G.painted) {
+        int k;
+        for (k = 0; k < pvn; k++)
+            if (pvgame[k] == (Game *)nd) {
+                hi = pvlit[k];
+                break;
+            }
+    }
+    draw_row(m->lvdm_RastPort, pens[hi ? FILLPEN : BACKGROUNDPEN], pens[hi ? FILLTEXTPEN : TEXTPEN],
+             m->lvdm_Bounds.MinX, m->lvdm_Bounds.MinY, m->lvdm_Bounds.MaxX, m->lvdm_Bounds.MaxY,
+             nd->ln_Name ? nd->ln_Name : "");
+    return LVCB_OK;
+}
+
 /* Where the list is scrolled to: kept across a redraw (GadTools 39+ can be
  * asked; 2.04 starts at the top again). */
 static void remember_top(void)
@@ -246,6 +302,8 @@ static void detach_list(void)
 
 static void attach_list(void)
 {
+    G.painted = 0;                /* GadTools draws every row again */
+    pvn = 0;
     if (G.win && G.g[G_LIST])
         GT_SetGadgetAttrs(G.g[G_LIST], G.win, NULL, GTLV_Labels, (ULONG)&G.list,
                           GTLV_Top, G.top, GTLV_Selected, sel_index(), TAG_END);
@@ -292,13 +350,14 @@ static long row_at(WORD x, WORD y)
  * passed over. How many changed. */
 static long mark_rows(long a, long b, int on)
 {
-    long i, n = 0;
+    struct Node *nd;
+    long i = 0, n = 0;
     if (a > b) {
-        i = a; a = b; b = i;
+        i = a; a = b; b = i; i = 0;
     }
-    for (i = a; i <= b; i++) {
-        Game *g = nth_shown(i);
-        if (!g || !markable(g) || !is_marked(g) == !on)
+    for (nd = G.list.lh_Head; nd->ln_Succ && i <= b; nd = nd->ln_Succ, i++) {
+        Game *g = (Game *)nd;
+        if (i < a || !markable(g) || !is_marked(g) == !on)
             continue;
         if (G.filter == SHOW_UNWANTED)
             g->doomed = on;
@@ -307,6 +366,105 @@ static long mark_rows(long a, long b, int on)
         n++;
     }
     return n;
+}
+
+/* Rows a..b written again (their marks changed): only those labels, not
+ * the whole list - that takes a second on a 68030 with 3,000 games. */
+static void relabel_rows(long a, long b)
+{
+    struct Node *nd;
+    long i = 0;
+    if (a > b) {
+        i = a; a = b; b = i; i = 0;
+    }
+    detach_list();
+    for (nd = G.list.lh_Head; nd->ln_Succ && i <= b; nd = nd->ln_Succ, i++)
+        if (i >= a)
+            make_label((Game *)nd);
+    attach_list();
+}
+
+/* The button is held over row r after going down on another: say what
+ * letting go there will do. */
+/* The rows the list shows, drawn straight into the window while the
+ * button is held: with preview, a drag's run (press..dragrow) as letting
+ * go will leave it; without, as the marks are. GadTools only redraws its
+ * rows when it is given the list again, which it can't be mid-drag. */
+static void paint_rows(int preview)
+{
+    struct RastPort *rp = G.win->RPort;
+    struct TextFont *was = rp->Font;
+    struct Node *nd;
+    Game *f = preview ? nth_shown(G.press) : NULL;
+    long lo = G.press < G.dragrow ? G.press : G.dragrow;
+    long hi = G.press < G.dragrow ? G.dragrow : G.press;
+    long i = 0, rows = (G.lvbox.Height - 4) / G.lvfont->tf_YSize;
+    int on = f && !is_marked(f), k;
+    /* only the rows that change: the same top as last time, each row is
+     * redrawn only when its colour is not what it was */
+    int same = G.painted && pvn;
+    WORD x0 = G.lvbox.Left + 2, x1 = G.lvbox.Left + G.lvbox.Width - 19;
+    remember_top();
+    if (G.top != G.pvtop)
+        same = 0;
+    if (rows > PV_ROWS)
+        rows = PV_ROWS;
+    SetFont(rp, G.lvfont);
+    for (nd = G.list.lh_Head; nd->ln_Succ && i < G.top + rows; nd = nd->ln_Succ, i++) {
+        Game *g = (Game *)nd;
+        WORD y0;
+        int lit;
+        if (i < G.top)
+            continue;
+        k = (int)(i - G.top);
+        lit = f && i >= lo && i <= hi && markable(g) ? on : is_marked(g);
+        if (same && k < pvn && pvgame[k] == g && pvlit[k] == lit)
+            continue;
+        pvgame[k] = g;
+        pvlit[k] = (UBYTE)lit;
+        y0 = G.lvbox.Top + 2 + (WORD)k * G.lvfont->tf_YSize;
+        draw_row(rp, G.pens[lit ? 2 : 1], G.pens[lit ? 3 : 0], x0, y0, x1, y0 + G.lvfont->tf_YSize - 1,
+                 g->label);
+    }
+    if (!same)
+        pvn = (int)(i - G.top) > 0 ? (int)(i - G.top) : 0;
+    SetFont(rp, was);
+    G.painted = preview;
+    G.pvtop = G.top;
+}
+
+static void drag_preview(long r)
+{
+    char txt[160];
+    Game *f, *a, *b;
+    long n = 0, i;
+    if (r < 0 || !(f = nth_shown(G.press)))
+        return;
+    remember_top();
+    if (r == G.dragrow && G.top == G.pvtop && G.painted)
+        return;                   /* the same row, not scrolled: nothing new */
+    G.dragrow = r;
+    paint_rows(1);
+    if (r == G.press) {
+        gui_status("Drag over the games to mark them all");
+        return;
+    }
+    {                             /* one walk down the list: it can be long */
+        long lo = G.press < r ? G.press : r, hi = G.press < r ? r : G.press;
+        struct Node *nd;
+        a = b = NULL;
+        for (nd = G.list.lh_Head, i = 0; nd->ln_Succ && i <= hi; nd = nd->ln_Succ, i++) {
+            if (i < lo)
+                continue;
+            if (i == lo)
+                a = (Game *)nd;
+            b = (Game *)nd;
+            n += markable((Game *)nd);
+        }
+    }
+    snprintf(txt, sizeof(txt), "%s %ld: %s to %s - let go to %s", is_marked(f) ? "Unmarking" : "Marking",
+             n, a ? a->name : "?", b ? b->name : "?", is_marked(f) ? "unmark" : "mark");
+    gui_status(txt);
 }
 
 static void set_summary(void)
@@ -458,10 +616,30 @@ static int make_gadgets(void)
     G.cols = (ng.ng_Width - 24) / G.lvfont->tf_XSize;
     if (G.cols > (int)sizeof(((Game *)0)->label) - 1)
         G.cols = sizeof(((Game *)0)->label) - 1;
-    /* ShowSelected NULL: the clicked game stays highlighted */
-    G.g[G_LIST] = gad = CreateGadget(LISTVIEW_KIND, gad, &ng, GTLV_Labels, (ULONG)&G.list,
-                                     GTLV_ShowSelected, 0, GTLV_Selected, ~0UL,
-                                     GTLV_Top, G.top, TAG_END);
+    /* ShowSelected NULL: the clicked game stays highlighted; marked games
+     * are drawn highlighted too (list_draw, GadTools 39+) */
+    {
+        struct DrawInfo *dri = GetScreenDrawInfo(G.scr);
+        ULONG maxpen = 0;
+        if (dri) {
+            UWORD pens[4], i;
+            pens[0] = dri->dri_Pens[TEXTPEN];
+            pens[1] = dri->dri_Pens[BACKGROUNDPEN];
+            pens[2] = dri->dri_Pens[FILLPEN];
+            pens[3] = dri->dri_Pens[FILLTEXTPEN];
+            for (i = 0; i < 4; i++) {
+                G.pens[i] = pens[i];
+                if (pens[i] > maxpen)
+                    maxpen = pens[i];
+            }
+            FreeScreenDrawInfo(G.scr, dri);
+        }
+        G.lvhook.h_Entry = (ULONG (*)())list_draw;
+        G.g[G_LIST] = gad = CreateGadget(LISTVIEW_KIND, gad, &ng, GTLV_Labels, (ULONG)&G.list,
+                                         GTLV_ShowSelected, 0, GTLV_Selected, ~0UL,
+                                         GTLV_Top, G.top, GTLV_CallBack, (ULONG)&G.lvhook,
+                                         GTLV_MaxPen, maxpen, TAG_END);
+    }
     ng.ng_TextAttr = &G.ta;
 
     /* the buttons */
@@ -955,11 +1133,20 @@ int gui_main(struct Engine *e, const char *dirs)
             /* where the left button went down, for a drag over the list: the
              * list itself only tells where it came up, and GadTools keeps its
              * own press and moves to itself - so seen before its filter */
-            if (raw->Class == IDCMP_GADGETDOWN)
+            if (raw->Class == IDCMP_GADGETDOWN) {
                 G.press = row_at(raw->MouseX, raw->MouseY) >= 0 ? row_at(raw->MouseX, raw->MouseY) : -2;
-            else if (raw->Class == IDCMP_MOUSEMOVE && (raw->Qualifier & IEQUALIFIER_LEFTBUTTON) &&
-                     G.press == -1)
+                G.dragrow = -1;
+                drag_preview(G.press);            /* the row pressed shows at once */
+            } else if (raw->Class == IDCMP_INTUITICKS && !(raw->Qualifier & IEQUALIFIER_LEFTBUTTON) &&
+                       G.painted) {
+                paint_rows(0);                    /* let go outside the list: as it was */
+            } else if (raw->Class == IDCMP_MOUSEMOVE && (raw->Qualifier & IEQUALIFIER_LEFTBUTTON) &&
+                       G.press == -1) {
                 G.press = row_at(raw->MouseX, raw->MouseY) >= 0 ? row_at(raw->MouseX, raw->MouseY) : -2;
+                G.dragrow = G.press;
+            } else if ((raw->Class == IDCMP_MOUSEMOVE || raw->Class == IDCMP_INTUITICKS) &&
+                       (raw->Qualifier & IEQUALIFIER_LEFTBUTTON) && G.press >= 0)
+                drag_preview(row_at(raw->MouseX, raw->MouseY));   /* what letting go will do */
             else if (raw->Class == IDCMP_GADGETUP && (!raw->IAddress ||
                      ((struct Gadget *)raw->IAddress)->GadgetID != G_LIST))
                 G.press = -1;
@@ -1056,7 +1243,7 @@ int gui_main(struct Engine *e, const char *dirs)
                         G.press = -1;
                         snprintf(txt, sizeof(txt), "%ld game%s %s", n, n == 1 ? "" : "s",
                                  on ? "marked" : "unmarked");
-                        rebuild_list();
+                        relabel_rows(from, code);
                         marks_changed(txt);
                         break;
                     }
@@ -1067,13 +1254,13 @@ int gui_main(struct Engine *e, const char *dirs)
                             g->doomed = !g->doomed;
                         else
                             g->marked = !g->marked;
-                        rebuild_list();
+                        relabel_rows(code, code);
                         marks_changed(NULL);
                     } else if (g) {
                         gui_status(g->status == M_CURRENT ? "That one is up to date" :
                                    g->status == M_MISSING ? "Not on your drives: only in the pack list" :
                                    "No pack to update that one from");
-                        rebuild_list();
+                        relabel_rows(code, code);
                     }
                     break;
                 }
