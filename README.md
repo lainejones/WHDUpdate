@@ -22,7 +22,9 @@ DEPTH=n                              how many drawer levels to look down (3)
 Double-click the icon (or `WHDUpdate GUI` in a Shell): type the drawers your games are
 in - several with `;` between them, or `ALL` - and press **Check**. Type part of a name in **Find** and
 the list shows only those games. Click a game to mark it (`*`) - the game you clicked
-stays highlighted - or **Mark all** (the games the list shows), then **Update marked**. **Show** picks what the list shows:
+stays highlighted - or **Mark all** (the games the list shows), then **Update marked**. To mark
+a run of games, drag over them with the button held, or click the first and Shift-click the
+last; the status line says how many are marked. **Show** picks what the list shows:
 the updates, all games, the ones to check by hand, the ones not found, the ones whose
 slave has no version, the packs you don't have (**Missing**), or the games you don't
 want (**Not wanted**, see below). **Stop** ends a check or the updates between two steps. The drawers

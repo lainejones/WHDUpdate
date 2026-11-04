@@ -26,6 +26,7 @@
 #include <libraries/gadtools.h>
 #include <graphics/text.h>
 #include <graphics/gfxbase.h>
+#include <devices/inputevent.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <proto/intuition.h>
@@ -90,8 +91,12 @@ static struct {
     struct RastPort mrp;          /* for measuring text */
     struct List list;
     int filter, set, busy, stop, quit, cols;
+    long marked, doomed;          /* counted by set_summary */
     Game *sel;                    /* the game clicked last: stays highlighted */
     long top;                     /* the list's scroll position */
+    struct IBox lvbox;            /* where the list is in the window */
+    long anchor;                  /* the row clicked last: Shift-click marks from it */
+    long press;                   /* the row the button went down on (-1 none, -2 not the list) */
     char dirs[400], status[200], summary[120];
     char find[40];                /* part of a name: only those games are shown */
     struct Menu *menu;
@@ -270,6 +275,40 @@ static Game *nth_shown(long n)
     return NULL;
 }
 
+/* The row of the list at window position x,y, or -1 off the rows (the
+ * scroller, the border). The rows start 2 pixels into the box. */
+static long row_at(WORD x, WORD y)
+{
+    long r;
+    if (x < G.lvbox.Left + 2 || x >= G.lvbox.Left + G.lvbox.Width - 20 ||
+        y < G.lvbox.Top + 2 || y >= G.lvbox.Top + G.lvbox.Height - 2)
+        return -1;
+    remember_top();
+    r = G.top + (y - G.lvbox.Top - 2) / G.lvfont->tf_YSize;
+    return nth_shown(r) ? r : -1;
+}
+
+/* Rows a..b (either order) marked or unmarked; what can't be marked is
+ * passed over. How many changed. */
+static long mark_rows(long a, long b, int on)
+{
+    long i, n = 0;
+    if (a > b) {
+        i = a; a = b; b = i;
+    }
+    for (i = a; i <= b; i++) {
+        Game *g = nth_shown(i);
+        if (!g || !markable(g) || !is_marked(g) == !on)
+            continue;
+        if (G.filter == SHOW_UNWANTED)
+            g->doomed = on;
+        else
+            g->marked = on;
+        n++;
+    }
+    return n;
+}
+
 static void set_summary(void)
 {
     Engine *e = G.e;
@@ -289,6 +328,8 @@ static void set_summary(void)
             chk += g->status == M_CHECK || g->status == M_NEWER;
         }
     }
+    G.marked = marked;
+    G.doomed = doomed;
     if (!e->n)
         snprintf(G.summary, sizeof(G.summary), "No games checked yet");
     else if (G.filter == SHOW_UNWANTED)
@@ -299,6 +340,19 @@ static void set_summary(void)
                  n, upd, chk, miss, marked);
     if (G.win && G.g[G_SUMMARY])
         GT_SetGadgetAttrs(G.g[G_SUMMARY], G.win, NULL, GTTX_Text, (ULONG)G.summary, TAG_END);
+}
+
+/* After the marks changed: the counts, and what changed, if anything to
+ * say (a range), go in the status line over what the last run left there. */
+static void marks_changed(const char *what)
+{
+    char txt[120];
+    long n;
+    set_summary();
+    n = G.filter == SHOW_UNWANTED ? G.doomed : G.marked;
+    snprintf(txt, sizeof(txt), "%s%s%ld marked to %s", what ? what : "", what ? ", " : "", n,
+             G.filter == SHOW_UNWANTED ? "remove" : "update");
+    gui_status(txt);
 }
 
 /* ---- gadgets ------------------------------------------------------------- */
@@ -397,6 +451,10 @@ static int make_gadgets(void)
     ng.ng_GadgetText = NULL;
     ng.ng_GadgetID = G_LIST;
     ng.ng_TextAttr = &G.lvta;
+    G.lvbox.Left = ng.ng_LeftEdge;
+    G.lvbox.Top = ng.ng_TopEdge;
+    G.lvbox.Width = ng.ng_Width;
+    G.lvbox.Height = ng.ng_Height;
     G.cols = (ng.ng_Width - 24) / G.lvfont->tf_XSize;
     if (G.cols > (int)sizeof(((Game *)0)->label) - 1)
         G.cols = sizeof(((Game *)0)->label) - 1;
@@ -543,6 +601,7 @@ static void do_check(void)
     new_list(&G.list);
     G.sel = NULL;                 /* the games are about to be freed */
     G.top = 0;
+    G.anchor = -1;            /* another list: rows mean other games */
     engine_clear(e);
     attach_list();
     set_summary();
@@ -685,7 +744,7 @@ static void mark_all(int on)
             g->marked = on && g->status == M_UPDATE;
     }
     rebuild_list();
-    set_summary();
+    marks_changed(NULL);
 }
 
 /* The Find field changed (typed into, checked ten times a second): show
@@ -701,6 +760,7 @@ static void find_changed(void)
     strncpy(G.find, now, sizeof(G.find) - 1);
     detach_list();
     G.top = 0;
+    G.anchor = -1;            /* another list: rows mean other games */
     rebuild_list();
 }
 
@@ -881,17 +941,37 @@ int gui_main(struct Engine *e, const char *dirs)
     gui_status(G.dirs[0] ? "Checking..." :
                "Type the drawers your games are in (Games: or Games:;Games2:), then Check");
     relayout();
+    G.anchor = G.press = -1;
     if (G.dirs[0] || e->prefs.dirs[FAM_DEMOS][0] || e->prefs.dirs[FAM_MAGS][0])
         do_check();                   /* the drawers are known: check right away */
 
     while (!G.quit) {
-        struct IntuiMessage *msg;
+        struct IntuiMessage *raw, *msg;
         Wait(1UL << G.win->UserPort->mp_SigBit);
-        while (!G.quit && (msg = GT_GetIMsg(G.win->UserPort)) != NULL) {
-            ULONG cl = msg->Class;
-            UWORD code = msg->Code;
-            struct Gadget *gad = (struct Gadget *)msg->IAddress;
-            GT_ReplyIMsg(msg);
+        while (!G.quit && (raw = (struct IntuiMessage *)GetMsg(G.win->UserPort)) != NULL) {
+            ULONG cl;
+            UWORD code, qual;
+            struct Gadget *gad;
+            /* where the left button went down, for a drag over the list: the
+             * list itself only tells where it came up, and GadTools keeps its
+             * own press and moves to itself - so seen before its filter */
+            if (raw->Class == IDCMP_GADGETDOWN)
+                G.press = row_at(raw->MouseX, raw->MouseY) >= 0 ? row_at(raw->MouseX, raw->MouseY) : -2;
+            else if (raw->Class == IDCMP_MOUSEMOVE && (raw->Qualifier & IEQUALIFIER_LEFTBUTTON) &&
+                     G.press == -1)
+                G.press = row_at(raw->MouseX, raw->MouseY) >= 0 ? row_at(raw->MouseX, raw->MouseY) : -2;
+            else if (raw->Class == IDCMP_GADGETUP && (!raw->IAddress ||
+                     ((struct Gadget *)raw->IAddress)->GadgetID != G_LIST))
+                G.press = -1;
+            if (!(msg = GT_FilterIMsg(raw))) {      /* one GadTools handled itself */
+                ReplyMsg(&raw->ExecMessage);
+                continue;
+            }
+            cl = msg->Class;
+            code = msg->Code;
+            qual = msg->Qualifier;
+            gad = (struct Gadget *)msg->IAddress;
+            ReplyMsg(&GT_PostFilterIMsg(msg)->ExecMessage);
             switch (cl) {
             case IDCMP_CLOSEWINDOW:
                 G.quit = 1;
@@ -906,7 +986,7 @@ int gui_main(struct Engine *e, const char *dirs)
                 }
                 break;
             case IDCMP_INTUITICKS:            /* the list follows the Find field as you type */
-                if (!G.busy)
+                if (!G.busy && !(qual & IEQUALIFIER_LEFTBUTTON))
                     find_changed();
                 break;
             case IDCMP_NEWSIZE:
@@ -929,6 +1009,7 @@ int gui_main(struct Engine *e, const char *dirs)
                     G.set = code;
                     detach_list();
                     G.top = 0;
+                    G.anchor = -1;            /* another list: rows mean other games */
                     rebuild_list();
                     set_summary();
                     if (G.set && !((G.e->prefs.sets >> (G.set - 1)) & 1)) {
@@ -943,6 +1024,7 @@ int gui_main(struct Engine *e, const char *dirs)
                     G.filter = code;
                     detach_list();
                     G.top = 0;                /* another list: from its top */
+                    G.anchor = -1;
                     if (was != (G.filter == SHOW_UNWANTED))
                         relayout();           /* Update marked <-> Remove marked */
                     else
@@ -954,14 +1036,39 @@ int gui_main(struct Engine *e, const char *dirs)
                 }
                 case G_LIST: {
                     Game *g = nth_shown(code);
+                    long from = -1;
                     G.sel = g;                /* stays highlighted, marked or not */
+                    /* Shift-click: from the row clicked before, as that one is;
+                     * a drag: from the row it started on, the opposite of how
+                     * that one was */
+                    if ((qual & (IEQUALIFIER_LSHIFT | IEQUALIFIER_RSHIFT)) && G.anchor >= 0 &&
+                        nth_shown(G.anchor))
+                        from = G.anchor;
+                    else if (G.press >= 0 && G.press != (long)code)
+                        from = G.press;
+                    if (g && from >= 0) {
+                        Game *f = nth_shown(from);
+                        int on = from == G.anchor && (qual & (IEQUALIFIER_LSHIFT | IEQUALIFIER_RSHIFT)) ?
+                                 (markable(f) ? is_marked(f) : 1) : !is_marked(f);
+                        char txt[80];
+                        long n = mark_rows(from, code, on);
+                        G.anchor = from;
+                        G.press = -1;
+                        snprintf(txt, sizeof(txt), "%ld game%s %s", n, n == 1 ? "" : "s",
+                                 on ? "marked" : "unmarked");
+                        rebuild_list();
+                        marks_changed(txt);
+                        break;
+                    }
+                    G.anchor = code;
+                    G.press = -1;
                     if (g && markable(g)) {
                         if (G.filter == SHOW_UNWANTED)
                             g->doomed = !g->doomed;
                         else
                             g->marked = !g->marked;
                         rebuild_list();
-                        set_summary();
+                        marks_changed(NULL);
                     } else if (g) {
                         gui_status(g->status == M_CURRENT ? "That one is up to date" :
                                    g->status == M_MISSING ? "Not on your drives: only in the pack list" :
