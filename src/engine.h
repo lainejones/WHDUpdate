@@ -86,6 +86,8 @@ typedef struct Engine {
     Machine mach;
     int mach_known;
     Game **dupord;          /* the games with a twin, a group after the other (engine_dupes) */
+    /* asked when an update would need a Kickstart image you lack (UpdateConf) */
+    int (*kick_ask)(const char *path, const char *kick);
     long ndup;
     /* called for every game found (the Shell prints them); may be NULL */
     void (*seen)(void *ctx, const Game *g);
@@ -112,7 +114,8 @@ int  engine_scan_all(Engine *e, int depth);
 void engine_missing(Engine *e);
 
 /* Update one game; it then counts as current. 0 = updated, -1 = failed,
- * -2 = stopped. log = an open WHDUpdate.log or 0. */
+ * -2 = stopped, 1 = left as it was (the new pack needs a Kickstart image
+ * you lack, and kick_ask said keep it). log = an open WHDUpdate.log or 0. */
 int  engine_update(Engine *e, Game *g, BPTR log);
 BPTR engine_open_log(void);
 
@@ -158,6 +161,18 @@ int  engine_find_kicks(const char *dir, KickNeed *need, int n);
 /* Copy k->found to DEVS:Kickstarts/kick<name>. 0 = done (*rtb = 0 when
  * the .RTB file WHDLoad also needs is not there), -1 = failed. */
 int  engine_copy_kick(const KickNeed *k, int *rtb);
+
+/* Put back game i's copy from before its last update (undo_update); its
+ * version and status are read again. The old copy's path into from.
+ * 0 = done, 1 = no old copy, -1 = failed. */
+int  engine_undo(Engine *e, long i, BPTR log, char *from, int size);
+/* Copy the saves of the games want() picks (NULL: all installed ones) into
+ * dest/<game name>/... How many files; *games = how many games had some. */
+long engine_backup_saves(Engine *e, const char *dest, int (*want)(const Game *g), long *games);
+/* The room the marked games need (install = the ones under Missing, else
+ * the updates), as "about N MB on Vol: (M MB free)" per volume. 1 = some
+ * volume looks too full. */
+int  engine_space(Engine *e, int install, char *out, int size);
 
 /* The first drawer of family fam in the settings, "" if none. */
 void engine_family_dir(const Engine *e, int fam, char *out, int size);

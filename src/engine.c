@@ -1039,8 +1039,11 @@ int engine_update(Engine *e, Game *g, BPTR log)
     c.setdir = pack_sets[g->pack->set].dir;
     c.ftp_only = e->prefs.ftp_only;
     c.log = log;
+    c.kick_ask = e->kick_ask;
     ftp_login(e->prefs.user, e->prefs.pass);
     rc = update_game(&c, g->path, g->pack, g->installed);
+    if (rc == 1)
+        g->marked = 0;
     if (rc == 0) {
         e->st[g->status]--;
         g->status = M_CURRENT;
@@ -1584,4 +1587,139 @@ int engine_copy_kick(const KickNeed *k, int *rtb)
         UnLock(l);
     *rtb = l != 0;
     return 0;
+}
+
+/* ---- Undo an update ----------------------------------------------------------- */
+
+int engine_undo(Engine *e, long i, BPTR log, char *from, int size)
+{
+    Game *g = e->games[i];
+    SlaveInfo si;
+    int rc;
+    if (!g->path)
+        return -1;
+    rc = undo_update(log, g->path, from, size);
+    if (rc)
+        return rc;
+    {                                         /* listed again by the next check */
+        struct ScanCache *c = e->cache;
+        CacheEntry *ce = c ? cache_search(c->e, c->sorted, g->path) : NULL;
+        if (ce) {
+            ce->dd.ds_Days = 0;
+            ce->size = -1;
+            c->dirty = 1;
+        }
+    }
+    /* what is there now (its slave can have another name than the newer
+     * one's): its version, matched to the newest pack */
+    g->installed[0] = 0;
+    if (drawer_slave(g->path, &si)) {
+        strncpy(g->installed, si.version, sizeof(g->installed) - 1);
+        g->wsver = si.ws_version;
+        g->wsflags = si.flags;
+        g->basemem = si.basemem;
+        g->expmem = si.expmem;
+        strcpy(g->kick, si.kick);
+        memcpy(g->kickcrc, si.kickcrc, sizeof(g->kickcrc));
+    }
+    e->st[g->status]--;
+    if (!g->pack)
+        g->status = g->installed[0] ? M_NOMATCH : M_UNKNOWN;
+    else if (!g->installed[0])
+        g->status = M_UNKNOWN;
+    else {
+        int c = version_cmp(g->installed, g->pack->ver);
+        g->status = c == VERSION_UNSURE ? M_CHECK : c < 0 ? M_UPDATE : c > 0 ? M_NEWER : M_CURRENT;
+    }
+    e->st[g->status]++;
+    g->saves = -1;
+    return 0;
+}
+
+/* ---- Back up saves -------------------------------------------------------- */
+
+long engine_backup_saves(Engine *e, const char *dest, int (*want)(const Game *g), long *games)
+{
+    long i, files = 0;
+    *games = 0;
+    {
+        BPTR l = Lock((STRPTR)dest, ACCESS_READ);
+        if (l)
+            UnLock(l);
+        else if ((l = CreateDir((STRPTR)dest)) != 0)
+            UnLock(l);
+        else
+            return -1;
+    }
+    for (i = 0; i < e->n && !break_pressed(); i++) {
+        const Game *g = e->games[i];
+        char to[400];
+        int k, n;
+        if (!g->path || (want && !want(g)))
+            continue;
+        snprintf(to, sizeof(to), "%s%s%s", dest, dest[strlen(dest) - 1] == ':' ? "" : "/", g->name);
+        for (n = 2; n < 100; n++) {               /* the same name in two drawers: Name.2 */
+            BPTR l = Lock((STRPTR)to, ACCESS_READ);
+            if (!l)
+                break;
+            UnLock(l);
+            snprintf(to, sizeof(to), "%s%s%s.%d", dest, dest[strlen(dest) - 1] == ':' ? "" : "/", g->name, n);
+        }
+        if (!(i & 15))
+            busy("Backing up saves... %s", g->name);
+        k = copy_saves(g->path, to);
+        if (k > 0) {
+            files += k;
+            (*games)++;
+        }
+    }
+    return files;
+}
+
+/* ---- Room for updates and installs ------------------------------------------- */
+
+int engine_space(Engine *e, int install, char *out, int size)
+{
+    struct { char vol[32]; unsigned long need; } v[4];  /* KB */
+    int nv = 0, full = 0, k, o = 0;
+    long i;
+    out[0] = 0;
+    for (i = 0; i < e->n; i++) {
+        const Game *g = e->games[i];
+        char where[400], vol[32];
+        const char *c;
+        int l;
+        if (!g->marked || !g->pack || (install ? g->status != M_MISSING : !g->path))
+            continue;
+        if (install)
+            engine_family_dir(e, g->family, where, sizeof(where));
+        else
+            strncpy(where, g->path, sizeof(where) - 1), where[sizeof(where) - 1] = 0;
+        if (!(c = strchr(where, ':')))
+            continue;
+        l = (int)(c + 1 - where);
+        if (l >= (int)sizeof(vol))
+            continue;
+        memcpy(vol, where, l);
+        vol[l] = 0;
+        for (k = 0; k < nv && strcmp(v[k].vol, vol); k++)
+            ;
+        if (k == nv) {
+            if (nv == 4)
+                continue;
+            strcpy(v[nv].vol, vol);
+            v[nv++].need = 0;
+        }
+        /* unpacked, a game is about twice its pack; the old copy of an
+         * update stays (in WHDUpdate-Old), so the new one is all extra */
+        v[k].need += (g->pack->size / 1024 + 1) * 22 / 10;
+    }
+    for (k = 0; k < nv && o < size - 1; k++) {
+        unsigned long fr = volume_free(v[k].vol) / 1024;
+        if (v[k].need + 1024 > fr)
+            full = 1;
+        o += snprintf(out + o, size - o, "%sabout %lu MB on %s (%lu MB free)", k ? "\n" : "",
+                      v[k].need / 1024 + 1, v[k].vol, fr / 1024);
+    }
+    return full;
 }

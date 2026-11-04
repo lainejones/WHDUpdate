@@ -213,21 +213,31 @@ static int ends_nocase(const char *s, const char *w)
     return sl >= wl && has_nocase(s + sl - wl, w);
 }
 
-/* A file a game writes: save games, high scores, WHDLoad's save disks
- * ("Disk.1" made by the slave). rel = its path inside the game drawer. */
+/* "Disk.1", "disk.12": a WHDLoad disk image - the game's own data in many
+ * packs, or a save disk the slave made. */
+static int is_disk(const char *name)
+{
+    const char *p;
+    if (!((name[0] | 32) == 'd' && (name[1] | 32) == 'i' && (name[2] | 32) == 's' &&
+          (name[3] | 32) == 'k' && name[4] == '.' && name[5] >= '0' && name[5] <= '9'))
+        return 0;
+    for (p = name + 5; *p >= '0' && *p <= '9'; p++)
+        ;
+    return *p == 0;
+}
+
+/* A file a game writes: save games, high scores. rel = its path inside the
+ * game drawer. Disk images ("Disk.1" ...) are not: in most packs they are
+ * the game's own data, and no date tells them from a save disk the slave
+ * made (packs are dated anyhow: disks imaged after the icons, files from
+ * 1978) - carry_saves goes by what the new pack brings instead. */
 static int is_save(const char *rel)
 {
-    const char *name = leaf_of(rel), *p;
-    if (has_nocase(rel, "save") || has_nocase(name, "high") || has_nocase(name, "score") ||
-        ends_nocase(name, ".hi") || ends_nocase(name, ".sav"))
-        return 1;
-    if ((name[0] | 32) == 'd' && (name[1] | 32) == 'i' && (name[2] | 32) == 's' &&
-        (name[3] | 32) == 'k' && name[4] == '.' && name[5] >= '0' && name[5] <= '9') {
-        for (p = name + 5; *p >= '0' && *p <= '9'; p++)
-            ;
-        return *p == 0;
-    }
-    return 0;
+    const char *name = leaf_of(rel);
+    if (is_disk(name))
+        return 0;
+    return has_nocase(rel, "save") || has_nocase(name, "high") || has_nocase(name, "score") ||
+           ends_nocase(name, ".hi") || ends_nocase(name, ".sav");
 }
 
 /* Are the two files byte for byte the same? */
@@ -292,6 +302,20 @@ static int carry_saves(const char *olddir, const char *newdir, const char *rel)
                 }
                 memcpy(subs + sl, name, l);
                 sl += l;
+            } else if (fib->fib_DirEntryType < 0 && is_disk(name)) {
+                /* a disk image the new pack brings is its data: left alone;
+                 * one only the old drawer has, the game made: carried */
+                cat_path(o, olddir, r);
+                cat_path(n, newdir, r);
+                if (!exists(n)) {
+                    char parent[P];
+                    strcpy(parent, n);
+                    *(char *)leaf_of(parent) = 0;
+                    if (exists(parent) && copy_file(o, n)) {
+                        say("  kept %s", r);
+                        count++;
+                    }
+                }
             } else if (fib->fib_DirEntryType < 0 && is_save(r)) {
                 cat_path(o, olddir, r);
                 cat_path(n, newdir, r);
@@ -456,7 +480,14 @@ static void keep_icons_in(const char *olddir, const char *newdir)
     UnLock(lock);
 }
 
+static int count_in(const char *path);
+
 int count_saves(const char *path)
+{
+    return count_in(path);
+}
+
+static int count_in(const char *path)
 {
     char sub[P];
     BPTR lock = Lock((STRPTR)path, ACCESS_READ);
@@ -471,7 +502,7 @@ int count_saves(const char *path)
                 if (!sub[0])
                     continue;
                 if (fib->fib_DirEntryType > 0)
-                    n += count_saves(sub);
+                    n += count_in(sub);
                 else if (is_save((const char *)fib->fib_FileName))
                     n++;
             }
@@ -545,16 +576,15 @@ static void slave_info(const char *dir, char *ver, int size, SlaveInfo *si_out)
 
 static void log_line(const UpdateConf *c, const char *s);
 
-/* A new drawer's slave may ask for a Kickstart image the old one didn't
- * (SevenCitiesOfGold v1.1 took 1.3, v2.1b takes the A1000's 1.1): say so
- * when none of its images is in DEVS:Kickstarts, and log it. */
-static void kick_note(const UpdateConf *c, const char *path, const SlaveInfo *si)
+/* Does the slave need a Kickstart image none of which is in
+ * DEVS:Kickstarts? 1 = yes (the first name into first, if not NULL). */
+static int kick_missing(const SlaveInfo *si, char *first, int size)
 {
-    char one[48], f[80], msg[P + 120];
+    char one[48], f[80];
     const char *p = si->kick;
     int n;
     if (!p[0])
-        return;
+        return 0;
     while (*p) {
         for (n = 0; *p && *p != '|' && n < (int)sizeof(one) - 1; )
             one[n++] = *p++;
@@ -563,8 +593,24 @@ static void kick_note(const UpdateConf *c, const char *path, const SlaveInfo *si
             p++;
         snprintf(f, sizeof(f), "DEVS:Kickstarts/kick%s", one);
         if (exists(f))
-            return;
+            return 0;
     }
+    if (first) {
+        n = (int)(strchr(si->kick, '|') ? strchr(si->kick, '|') - si->kick : (int)strlen(si->kick));
+        snprintf(first, size, "%.*s", n, si->kick);
+    }
+    return 1;
+}
+
+/* A new drawer's slave may ask for a Kickstart image the old one didn't
+ * (SevenCitiesOfGold v1.1 took 1.3, v2.1b takes the A1000's 1.1): say so
+ * when none of its images is in DEVS:Kickstarts, and log it. */
+static void kick_note(const UpdateConf *c, const char *path, const SlaveInfo *si)
+{
+    char msg[P + 120];
+    int n;
+    if (!kick_missing(si, NULL, 0))
+        return;
     n = (int)(strchr(si->kick, '|') ? strchr(si->kick, '|') - si->kick : (int)strlen(si->kick));
     say("  NOTE: it needs DEVS:Kickstarts/kick%.*s%s, which is not there - it won't start until it is",
         n, si->kick, strchr(si->kick, '|') ? " (or another)" : "");
@@ -762,6 +808,23 @@ int update_game(const UpdateConf *c, const char *path, const Pack *p, const char
     }
     snprintf(newinfo, sizeof(newinfo), "%s.info", newdir);
 
+    /* a pack that needs a Kickstart image you don't have, where the copy
+     * you have now didn't: asked before anything changes */
+    {
+        SlaveInfo nsi, osi;
+        char nv[16], kn[48];
+        slave_info(newdir, nv, sizeof(nv), &nsi);
+        slave_info(path, nv, sizeof(nv), &osi);
+        if (kick_missing(&nsi, kn, sizeof(kn)) && !kick_missing(&osi, NULL, 0) && c->kick_ask &&
+            !c->kick_ask(path, kn)) {
+            delete_tree(work);
+            say("  kept the old one: %s needs DEVS:Kickstarts/kick%s", p->file, kn);
+            snprintf(msg, sizeof(msg), "kept %s: %s needs DEVS:Kickstarts/kick%s (not there)", path, p->file, kn);
+            log_line(c, msg);
+            return 1;
+        }
+    }
+
     /* 3. saves  4. icons inside the drawer */
     kept = carry_saves(path, newdir, "");
     keep_icons_in(path, newdir);
@@ -898,4 +961,138 @@ int install_game(const UpdateConf *c, const char *dest, const char *name, const 
         kick_note(c, target, &si);
     }
     return 0;
+}
+
+unsigned long volume_free(const char *path)
+{
+    return free_bytes(path);
+}
+
+/* The newest old copy of leaf in olddir (leaf, leaf.2 ... as backup_name
+ * makes them): its path into out. 0 = none. */
+static int newest_backup(const char *olddir, const char *leaf, char *out)
+{
+    char t[P];
+    int i, found = 0;
+    cat_path(t, olddir, leaf);
+    if (t[0] && exists(t)) {
+        strcpy(out, t);
+        found = 1;
+    }
+    for (i = 2; i < 100; i++) {
+        snprintf(t, sizeof(t), "%s/%s.%d", olddir, leaf, i);
+        if (!exists(t))
+            break;
+        strcpy(out, t);
+        found = 1;
+    }
+    return found;
+}
+
+int undo_update(BPTR log, const char *path, char *from, int size)
+{
+    UpdateConf c;
+    char vol[P], olddir[P], back[P], backinfo[P], info[P], aside[P], asideinfo[P], undone[120], msg[P * 2 + 80];
+    const char *colon = strchr(path, ':');
+    int i, kept;
+
+    memset(&c, 0, sizeof(c));
+    c.log = log;
+    from[0] = 0;
+    if (!colon || !colon[1] || strlen(path) > P - 40)
+        return -1;
+    memcpy(vol, path, colon + 1 - path);
+    vol[colon + 1 - path] = 0;
+    cat_path(olddir, vol, OLDDIR);
+    if (!newest_backup(olddir, leaf_of(path), back))
+        return 1;
+    snprintf(backinfo, sizeof(backinfo), "%s.info", back);
+    snprintf(info, sizeof(info), "%s.info", path);
+    /* the copy there now: aside as <name>.undone[.n] */
+    snprintf(undone, sizeof(undone), "%s.undone", leaf_of(path));
+    cat_path(aside, olddir, undone);
+    for (i = 2; exists(aside) && i < 100; i++)
+        snprintf(aside, sizeof(aside), "%s/%s.undone.%d", olddir, leaf_of(path), i);
+    snprintf(asideinfo, sizeof(asideinfo), "%s.info", aside);
+    kept = carry_saves(path, back, "");          /* the saves made since the update */
+    if (!Rename((STRPTR)path, (STRPTR)aside)) {
+        say("  cannot move %s aside (in use?)", path);
+        return -1;
+    }
+    if (exists(info))
+        Rename((STRPTR)info, (STRPTR)asideinfo);
+    if (!Rename((STRPTR)back, (STRPTR)path)) {
+        say("  cannot move the old copy back - the newer one is back in place");
+        Rename((STRPTR)aside, (STRPTR)path);
+        if (exists(asideinfo))
+            Rename((STRPTR)asideinfo, (STRPTR)info);
+        return -1;
+    }
+    if (exists(backinfo))
+        Rename((STRPTR)backinfo, (STRPTR)info);
+    else if (exists(asideinfo))
+        copy_file(asideinfo, info);              /* the old copy had no icon there: keep this one */
+    if ((int)strlen(back) < size)
+        strcpy(from, back);
+    say("  put back %s, %d save(s) carried over; the newer one is in %s", back, kept, aside);
+    snprintf(msg, sizeof(msg), "undid the update of %s: put back %s, %d save(s) carried over, newer copy %s",
+             path, back, kept, aside);
+    log_line(&c, msg);
+    return 0;
+}
+
+static int copy_in(const char *gamedir, const char *dest);
+
+int copy_saves(const char *gamedir, const char *dest)
+{
+    return copy_in(gamedir, dest);
+}
+
+static int copy_in(const char *gamedir, const char *dest)
+{
+    char sub[P], to[P];
+    BPTR lock = Lock((STRPTR)gamedir, ACCESS_READ);
+    struct FileInfoBlock *fib;
+    int n = 0, made = 0;
+    if (!lock)
+        return 0;
+    if ((fib = (struct FileInfoBlock *)AllocDosObject(DOS_FIB, NULL)) != NULL) {
+        if (Examine(lock, fib))
+            while (ExNext(lock, fib)) {
+                const char *nm = (const char *)fib->fib_FileName;
+                cat_path(sub, gamedir, nm);
+                cat_path(to, dest, nm);
+                if (!sub[0] || !to[0])
+                    continue;
+                if (fib->fib_DirEntryType > 0) {
+                    int k = count_in(sub);
+                    if (k > 0) {
+                        if (!make_dir(dest) && !made)
+                            break;
+                        made = 1;
+                        k = copy_in(sub, to);
+                        if (k > 0)
+                            n += k;
+                    }
+                } else if (is_save(nm)) {
+                    if (!made && !make_dir(dest)) {
+                        n = -1;
+                        break;
+                    }
+                    made = 1;
+                    if (copy_file(sub, to))
+                        n++;
+                }
+            }
+        FreeDosObject(DOS_FIB, fib);
+    }
+    UnLock(lock);
+    return n;
+}
+
+int drawer_slave(const char *dir, SlaveInfo *si)
+{
+    char ver[16];
+    slave_info(dir, ver, sizeof(ver), si);
+    return si->ws_version != 0;
 }

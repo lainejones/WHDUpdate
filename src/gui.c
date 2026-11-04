@@ -67,7 +67,7 @@ static const char *set_labels[] = {"All sets", "Games", "Games Beta", "Demos", "
                                    "Magazines", NULL};
 
 enum { MN_CHECK = 1, MN_UPDATE, MN_ABOUT, MN_QUIT, MN_SERVER, MN_SETS, MN_LANG, MN_SYS, MN_FTPONLY,
-       MN_REMOVE, MN_INSTALL, MN_EXPORT, MN_KICKS };
+       MN_REMOVE, MN_INSTALL, MN_EXPORT, MN_KICKS, MN_UNDO, MN_SAVES };
 
 static struct NewMenu menu_def[] = {
     {NM_TITLE, (STRPTR)"Project", NULL, 0, 0, NULL},
@@ -75,9 +75,11 @@ static struct NewMenu menu_def[] = {
     {NM_ITEM, (STRPTR)"Update marked", (STRPTR)"U", 0, 0, (APTR)MN_UPDATE},
     {NM_ITEM, (STRPTR)"Remove marked...", (STRPTR)"R", 0, 0, (APTR)MN_REMOVE},
     {NM_ITEM, (STRPTR)"Install marked...", (STRPTR)"I", 0, 0, (APTR)MN_INSTALL},
+    {NM_ITEM, (STRPTR)"Undo update of the clicked game...", (STRPTR)"Z", 0, 0, (APTR)MN_UNDO},
     {NM_ITEM, NM_BARLABEL, NULL, 0, 0, NULL},
     {NM_ITEM, (STRPTR)"Save list as CSV...", (STRPTR)"E", 0, 0, (APTR)MN_EXPORT},
     {NM_ITEM, (STRPTR)"Find Kickstart images...", (STRPTR)"K", 0, 0, (APTR)MN_KICKS},
+    {NM_ITEM, (STRPTR)"Back up saves...", (STRPTR)"B", 0, 0, (APTR)MN_SAVES},
     {NM_ITEM, NM_BARLABEL, NULL, 0, 0, NULL},
     {NM_ITEM, (STRPTR)"About...", NULL, 0, 0, (APTR)MN_ABOUT},
     {NM_ITEM, NM_BARLABEL, NULL, 0, 0, NULL},
@@ -877,8 +879,8 @@ static void do_update(void)
 {
     Engine *e = G.e;
     struct EasyStruct es;
-    char body[200];
-    long i, n = 0, k = 0, done = 0, failed = 0;
+    char body[500];
+    long i, n = 0, k = 0, done = 0, failed = 0, kept = 0;
     BPTR log;
 
     for (i = 0; i < e->n; i++)
@@ -887,8 +889,13 @@ static void do_update(void)
         gui_status("Mark the games to update first: click them in the list");
         return;
     }
-    snprintf(body, sizeof(body), "Update %ld game%s?\nThe old copies go to WHDUpdate-Old\n"
-             "on the same volume.", n, n == 1 ? "" : "s");
+    {
+        char room[200];
+        int full = engine_space(e, 0, room, sizeof(room));
+        snprintf(body, sizeof(body), "Update %ld game%s?\nThe old copies go to WHDUpdate-Old\n"
+                 "on the same volume.\n\nRoom needed: %s%s", n, n == 1 ? "" : "s", room,
+                 full ? "\n\nThat looks like more than there is!" : "");
+    }
     memset(&es, 0, sizeof(es));
     es.es_StructSize = sizeof(es);
     es.es_Title = (UBYTE *)"WHDUpdate";
@@ -907,6 +914,7 @@ static void do_update(void)
         say("(%ld/%ld) %s %s > %s", k, n, g->name, g->installed, g->pack->ver);
         switch (engine_update(e, g, log)) {
         case 0: done++; break;
+        case 1: kept++; break;
         case -2: break;
         default: failed++; g->marked = 0;
         }
@@ -918,8 +926,8 @@ static void do_update(void)
     set_busy(0);
     rebuild_list();
     set_summary();
-    say("%ld updated%s%ld failed. Old copies: WHDUpdate-Old; log: %s", done,
-        G.stop ? " (stopped), " : ", ", failed, LOGFILE);
+    say("%ld updated%s%ld failed%s. Old copies: WHDUpdate-Old; log: %s", done,
+        G.stop ? " (stopped), " : ", ", failed, kept ? ", some kept (Kickstart)" : "", LOGFILE);
 }
 
 /* Remove the games marked under Not wanted: deleted, or moved to
@@ -1074,7 +1082,7 @@ static void do_install(void)
 {
     Engine *e = G.e;
     struct EasyStruct es;
-    char body[400], dest[400];
+    char body[700], dest[400];
     long i, n = 0, k = 0, done = 0, failed = 0;
     BPTR log;
 
@@ -1085,9 +1093,14 @@ static void do_install(void)
         return;
     }
     engine_family_dir(e, FAM_GAMES, dest, sizeof(dest));
-    snprintf(body, sizeof(body), "Install %ld game%s?\n\nGames go into %s\n(into its A, B ... 0-9 drawers "
-             "when it has them);\ndemos and magazines into their own drawers\nfrom the settings.",
-             n, n == 1 ? "" : "s", dest[0] ? dest : "(no drawer set!)");
+    {
+        char room[200];
+        int full = engine_space(e, 1, room, sizeof(room));
+        snprintf(body, sizeof(body), "Install %ld game%s?\n\nGames go into %s\n(into its A, B ... 0-9 drawers "
+                 "when it has them);\ndemos and magazines into their own drawers\nfrom the settings.\n\n"
+                 "Room needed: %s%s", n, n == 1 ? "" : "s", dest[0] ? dest : "(no drawer set!)", room,
+                 full ? "\n\nThat looks like more than there is!" : "");
+    }
     memset(&es, 0, sizeof(es));
     es.es_StructSize = sizeof(es);
     es.es_Title = (UBYTE *)"WHDUpdate";
@@ -1246,6 +1259,126 @@ static void do_kicks(void)
         nortb ? "; some lack their .RTB file - it comes with WHDLoad" : "");
 }
 
+/* An update's new pack needs a Kickstart image you lack and the copy you
+ * have doesn't: update anyway, or keep the old one? (engine kick_ask) */
+static int gui_kick_ask(const char *path, const char *kick)
+{
+    struct EasyStruct es;
+    char body[600];
+    snprintf(body, sizeof(body), "%s:\nthe new version needs the Kickstart image\nDEVS:Kickstarts/kick%s,\n"
+             "which is not there - it would not start.\nThe version you have now doesn't need it.\n\n"
+             "(Find Kickstart images can look for it.)", path, kick);
+    memset(&es, 0, sizeof(es));
+    es.es_StructSize = sizeof(es);
+    es.es_Title = (UBYTE *)"WHDUpdate";
+    es.es_TextFormat = (UBYTE *)body;
+    es.es_GadgetFormat = (UBYTE *)"Update anyway|Keep the old one";
+    return EasyRequestArgs(G.win, &es, NULL, NULL) == 1;
+}
+
+/* Undo update: the clicked game's copy from before its last update comes
+ * back from WHDUpdate-Old, with the saves made since. */
+static void do_undo(void)
+{
+    struct EasyStruct es;
+    char body[500], from[600];
+    long i;
+    BPTR log;
+    Game *g = G.sel;
+    if (!g || !g->path) {
+        gui_status("Click the game first (any view), then Undo update");
+        return;
+    }
+    for (i = 0; i < G.e->n && G.e->games[i] != g; i++)
+        ;
+    if (i == G.e->n)
+        return;
+    snprintf(body, sizeof(body), "Put back the copy of\n%s\nfrom before its last update?\n\n"
+             "It comes from WHDUpdate-Old, with the saves made\nsince; the copy there now goes to "
+             "WHDUpdate-Old\nas %s.undone.", g->path, g->name);
+    memset(&es, 0, sizeof(es));
+    es.es_StructSize = sizeof(es);
+    es.es_Title = (UBYTE *)"WHDUpdate";
+    es.es_TextFormat = (UBYTE *)body;
+    es.es_GadgetFormat = (UBYTE *)"Put it back|Cancel";
+    if (!EasyRequestArgs(G.win, &es, NULL, NULL))
+        return;
+    log = engine_open_log();
+    switch (engine_undo(G.e, i, log, from, sizeof(from))) {
+    case 0: say("Put back %s (now %s)", from, g->installed[0] ? g->installed : "?"); break;
+    case 1: say("No older copy of %s in WHDUpdate-Old", g->name); break;
+    default: say("Could not put the old copy back (log: %s)", LOGFILE);
+    }
+    if (log)
+        Close(log);
+    rebuild_list();
+    set_summary();
+}
+
+/* "Saves-2026-11-04" for today. */
+static void saves_name(char *out, int size)
+{
+    struct DateStamp ds;
+    long days, y = 1978, m;
+    static const int ml[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    DateStamp(&ds);
+    days = ds.ds_Days;
+    for (;;) {
+        int leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        if (days < 365 + leap)
+            break;
+        days -= 365 + leap;
+        y++;
+    }
+    for (m = 0; m < 12; m++) {
+        int d = ml[m] + (m == 1 && ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0));
+        if (days < d)
+            break;
+        days -= d;
+    }
+    snprintf(out, size, "Saves-%04ld-%02ld-%02ld", y, m + 1, days + 1);
+}
+
+/* Back up saves: every save and high score file of the games the list
+ * shows, into <drawer>/Saves-<date>/<game>/... */
+static void do_saves(void)
+{
+    struct FileRequester *fr;
+    char dir[300], dest[360], sub[40];
+    long files, games;
+    int ok, l;
+    if (!G.e->n) {
+        gui_status("Check first, then Back up saves");
+        return;
+    }
+    if (!AslBase && !(AslBase = OpenLibrary((STRPTR)"asl.library", 37))) {
+        gui_status("Back up saves needs asl.library");
+        return;
+    }
+    fr = (struct FileRequester *)AllocAslRequestTags(ASL_FileRequest,
+            ASLFR_Window, (ULONG)G.win, ASLFR_TitleText, (ULONG)"Back up the saves into which drawer?",
+            ASLFR_InitialDrawer, (ULONG)"SYS:", ASLFR_DrawersOnly, TRUE, ASLFR_DoSaveMode, TRUE, TAG_END);
+    if (!fr)
+        return;
+    ok = AslRequest(fr, NULL);
+    strncpy(dir, (char *)fr->fr_Drawer, sizeof(dir) - 1);
+    dir[sizeof(dir) - 1] = 0;
+    FreeAslRequest(fr);
+    if (!ok || !dir[0])
+        return;
+    saves_name(sub, sizeof(sub));
+    l = (int)strlen(dir);
+    snprintf(dest, sizeof(dest), "%s%s%s", dir, dir[l - 1] == ':' || dir[l - 1] == '/' ? "" : "/", sub);
+    set_busy(1);
+    files = engine_backup_saves(G.e, dest, shown, &games);
+    set_busy(0);
+    if (files < 0)
+        say("Cannot make %s", dest);
+    else
+        say("%ld save file%s of %ld game%s copied to %s%s", files, files == 1 ? "" : "s", games,
+            games == 1 ? "" : "s", dest, G.stop ? " (stopped)" : "");
+}
+
 /* Mark all / Mark none: only the games the list shows (Find and Show), so a
  * search picks the ones to update (or, under Not wanted, to remove); games
  * marked earlier stay marked. */
@@ -1401,6 +1534,8 @@ static void do_menu(ULONG id, struct MenuItem *it)
     case MN_INSTALL: do_install(); break;
     case MN_EXPORT: do_export(); break;
     case MN_KICKS: do_kicks(); break;
+    case MN_UNDO: do_undo(); break;
+    case MN_SAVES: do_saves(); break;
     case MN_ABOUT:  about(); break;
     case MN_QUIT:   G.quit = 1; break;
     case MN_FTPONLY:
@@ -1469,6 +1604,7 @@ int gui_main(struct Engine *e, const char *dirs)
                "Type the drawers your games are in (Games: or Games:;Games2:), then Check");
     relayout();
     G.anchor = G.press = -1;
+    e->kick_ask = gui_kick_ask;
     if (G.dirs[0] || e->prefs.dirs[FAM_DEMOS][0] || e->prefs.dirs[FAM_MAGS][0])
         do_check();                   /* the drawers are known: check right away */
 

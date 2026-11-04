@@ -53,6 +53,13 @@ list and unpacked like an update, and goes into the first games drawer of the se
 its letter drawer (`A`, `B` ... `0-9`) when the drawer has those. Demos and magazines go into
 their own drawers from **Settings**. The drawer gets an `ArchiveName.txt` naming the pack.
 
+### Backing up saves
+
+**Project > Back up saves** copies the save games and high scores of the games the list shows
+(**All games** for all of them) into a drawer you pick, as `Saves-<date>/<game>/...`, in the
+same drawers as in the game. Disk images (`Disk.1` ...) are left out: in most packs they are the
+game itself, and a game that saves onto its disk keeps that inside the image.
+
 ### Removing games you don't want
 
 **Show Not wanted** lists the installed games whose pack is of a language or a system
@@ -113,9 +120,14 @@ For each game you say yes to, WHDUpdate:
 
 1. downloads the pack into `<volume>:WHDUpdate-Old/.work/` and checks its size and CRC
    against the pack list;
-2. unpacks it there with `C:LhA` (`C:UNLZX` for the few `.lzx` packs);
+2. unpacks it there with `C:LhA` (`C:UNLZX` for the few `.lzx` packs); if the new version
+   needs a Kickstart image that is not in `DEVS:Kickstarts` and the one you have didn't, it
+   asks first (**Update anyway** or **Keep the old one**; in a Shell it asks with the update,
+   and with `YES` it goes ahead and says so);
 3. copies your saves and high scores from the old drawer into the new one - the ones
-   the pack doesn't have, and the ones it has fresh (empty high scores): yours win;
+   the pack doesn't have, and the ones it has fresh (empty high scores): yours win. A disk
+   image (`Disk.1` ...) the new pack brings is its data and is never overwritten; one only
+   the old drawer has (a save disk the game made) is carried over;
 4. gives the new icons the places of the old ones and keeps the tooltypes you added or
    changed (`CUSTOM1`..., `PRELOAD`, ...) - with OS 3.5+ icon.library only, as an older
    one would lose a colour icon's image when writing it back;
@@ -123,7 +135,10 @@ For each game you say yes to, WHDUpdate:
    its place, under the old name. If that fails, the old one goes back.
 
 Nothing changes until step 5, and the old copy stays in `WHDUpdate-Old` until you delete
-it. Every update is logged in `PROGDIR:WHDUpdate.log`, and the drawer gets an `ArchiveName.txt`
+it. **Project > Undo update** puts it back: click the game, pick it, and the copy from before
+its last update returns, with the saves made since; the newer one goes to `WHDUpdate-Old` as
+`<name>.undone`. Before an update starts, the requester (or the Shell) says about how much
+room the new versions take on each volume. Every update is logged in `PROGDIR:WHDUpdate.log`, and the drawer gets an `ArchiveName.txt`
 naming the pack (as WHDFetch writes it), which later checks trust over the slave's version. Downloads are one at a time with a
 pause between them, to go easy on the server.
 

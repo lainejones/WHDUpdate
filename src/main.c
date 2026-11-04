@@ -137,6 +137,21 @@ static int ask(const char *question)
     }
 }
 
+static int cli_yes;
+
+/* The new pack needs a Kickstart image you lack (UpdateConf.kick_ask):
+ * asked like the update itself; with YES it goes ahead (and is logged). */
+static int cli_kick_ask(const char *path, const char *kick)
+{
+    char q[700];
+    if (cli_yes) {
+        printf("  note: the new version needs DEVS:Kickstarts/kick%s, which is not there\n", kick);
+        return 1;
+    }
+    snprintf(q, sizeof(q), "  The new version needs DEVS:Kickstarts/kick%s (not there) - update anyway?", kick);
+    return ask(q) == 'y';
+}
+
 static int cli_updates(Engine *e, int yes)
 {
     BPTR log;
@@ -151,7 +166,18 @@ static int cli_updates(Engine *e, int yes)
         return 0;
     }
     log = engine_open_log();
-    printf("\n%d game(s) to update. The old copies go to WHDUpdate-Old on the same volume.\n", total);
+    cli_yes = yes;
+    e->kick_ask = cli_kick_ask;
+    {
+        char room[200];
+        for (i = 0; i < e->n; i++)                /* the room all of them would take */
+            e->games[i]->marked = e->games[i]->status == M_UPDATE;
+        engine_space(e, 0, room, sizeof(room));
+        for (i = 0; i < e->n; i++)
+            e->games[i]->marked = 0;
+        printf("\n%d game(s) to update. The old copies go to WHDUpdate-Old on the same volume.\n"
+               "Room needed for all of them: %s\n", total, room);
+    }
     for (i = 0; i < e->n && !stop; i++) {
         Game *g = e->games[i];
         if (g->status != M_UPDATE)
@@ -174,8 +200,10 @@ static int cli_updates(Engine *e, int yes)
         if (!first)
             Delay(100);                   /* two seconds between downloads: go easy on the server */
         first = 0;
+        cli_yes = yes;
         switch (engine_update(e, g, log)) {
         case 0: done++; break;
+        case 1: break;                    /* kept: needs a Kickstart image you lack */
         case -2: printf("*** Stopped.\n"); stop = 1; break;
         default: failed++;
         }
