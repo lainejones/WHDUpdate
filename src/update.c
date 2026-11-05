@@ -1036,7 +1036,8 @@ fail:
 }
 
 /* The letter drawer for name in dest ("A", or "0-9" / "0" / "#" for a
- * digit) when dest has one, else dest itself. */
+ * digit) when dest has one - made when dest has other letter drawers but
+ * not this one - else dest itself. */
 static void letter_drawer(const char *dest, const char *name, char *out)
 {
     static const char *const digits[] = {"0-9", "0", "#", "123", NULL};
@@ -1056,8 +1057,25 @@ static void letter_drawer(const char *dest, const char *name, char *out)
     l[0] = (char)(name[0] >= 'a' && name[0] <= 'z' ? name[0] - 32 : name[0]);
     l[1] = 0;
     cat_path(try_, dest, l);
-    if (l[0] >= 'A' && l[0] <= 'Z' && try_[0] && exists(try_))
+    if (!(l[0] >= 'A' && l[0] <= 'Z') || !try_[0])
+        return;
+    if (exists(try_)) {
         strcpy(out, try_);
+        return;
+    }
+    /* dest is sorted into letter drawers but has none for this letter yet:
+     * make it (with the default drawer icon, like WHDUpdate-Old) */
+    for (i = 0; i < 26; i++) {
+        char other[P], k[2];
+        k[0] = (char)('A' + i);
+        k[1] = 0;
+        cat_path(other, dest, k);
+        if (other[0] && exists(other)) {
+            if (make_old_dir(try_))
+                strcpy(out, try_);
+            return;
+        }
+    }
 }
 
 int install_game(const UpdateConf *c, const char *dest, const char *name, const Pack *p,
