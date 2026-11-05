@@ -696,15 +696,12 @@ int remove_game(BPTR log, const char *path, int keep)
 
 /* A drawer of packs that every machine can reach (a network share, say):
  * a pack is taken from there when it is there, and one that had to be
- * downloaded is kept there for the next machine, as
- * <folder>/<set>/<letter>/<pack> - the server's layout, with the short set
- * names (Games, GamesBeta ...). */
+ * downloaded is kept there for the next machine, as <folder>/<set>/<pack>
+ * (Games/1943_v1.4.lha) - the layout the PC download tools use. */
 static void pack_home(const UpdateConf *c, const Pack *p, char *out)
 {
     char t[P];
     cat_path(t, c->packdir, c->setkey);
-    if (t[0])
-        cat_path(t, t, p->folder);
     if (t[0])
         cat_path(out, t, p->file);
     else
@@ -730,9 +727,9 @@ static int file_crc(const char *path, unsigned long *size, unsigned long *crc)
 }
 
 /* Is pack p in the pack folder, whole (its size and CRC as the DAT says)?
- * Looked for as <folder>/<set>/<letter>/<pack>, <folder>/<letter>/<pack> and
- * <folder>/<pack>, so a drawer of packs from elsewhere works too. Its path
- * into out. */
+ * Looked for as <folder>/<set>/<pack>, <folder>/<set>/<letter>/<pack>,
+ * <folder>/<letter>/<pack> and <folder>/<pack>, so a drawer of packs sorted
+ * another way works too. Its path into out. */
 static int local_pack(const UpdateConf *c, const Pack *p, char *out)
 {
     char t[P];
@@ -740,10 +737,17 @@ static int local_pack(const UpdateConf *c, const Pack *p, char *out)
     int i;
     if (!c->packdir || !c->packdir[0])
         return 0;
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < 4; i++) {
+        t[0] = 0;
         if (i == 0)
             pack_home(c, p, t);
         else if (i == 1) {
+            cat_path(t, c->packdir, c->setkey);
+            if (t[0])
+                cat_path(t, t, p->folder);
+            if (t[0])
+                cat_path(t, t, p->file);
+        } else if (i == 2) {
             cat_path(t, c->packdir, p->folder);
             if (t[0])
                 cat_path(t, t, p->file);
@@ -774,9 +778,7 @@ static int make_home_dirs(const UpdateConf *c, const Pack *p)
     if (!make_dir(t))
         return 0;
     cat_path(t, c->packdir, c->setkey);
-    if (!t[0] || !make_dir(t))
-        return 0;
-    cat_path(t, t, p->folder);
+    (void)p;
     return t[0] && make_dir(t);
 }
 

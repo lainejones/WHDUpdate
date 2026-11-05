@@ -11,7 +11,7 @@
     (abort "Can't find the WHDUpdate files next to this script.\n\n"
            "Run the installer from the drawer it came in."))
 
-(message "WHDUpdate 0.6.2 - keeps your WHDLoad games up to date\n\n"
+(message "WHDUpdate 0.10 - keeps your WHDLoad games up to date\n\n"
          "WHDUpdate compares the games in your drawers with Retroplay's WHDLoad "
          "packs and updates the ones that have a newer pack, on the Amiga itself. "
          "It needs a TCP/IP stack (bsdsocket.library) to fetch the pack list.")
@@ -46,6 +46,6 @@
         (run (cat "Copy >NIL: ENV:Sys/def_drawer.info \"" pkgdir ".info\""))))
 (complete 100)
 
-(message "WHDUpdate 0.6.2 is installed in " target ".\n\n"
+(message "WHDUpdate 0.10 is installed in " target ".\n\n"
          "Double-click its icon, type the drawers your games are in and press Check.")
 (exit (quiet))

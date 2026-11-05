@@ -8,7 +8,8 @@ typedef struct {
     const char *host, *webdir, *ftpdir, *setdir;  /* where the packs are */
     int ftp_only;
     /* The pack folder ("" or NULL = none): packs are taken from there, and
-     * the downloaded ones kept there, as <packdir>/<setkey>/<letter>/<pack>. */
+     * the downloaded ones kept there, as <packdir>/<setkey>/<pack>
+     * (setkey = the set's drawer there: Games, Beta-Game ...). */
     const char *packdir, *setkey;
     BPTR log;                                     /* WHDUpdate.log, or 0 */
     /* The new pack needs a Kickstart image (kick = its name, "31034.a1000")

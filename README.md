@@ -73,14 +73,15 @@ about - in **Settings > Server... > Pack folder** (or `PACKS=` in a Shell). Then
 
 - a pack that is in the pack folder is taken from there, after its size and CRC are checked
   against the pack list - no download, and no network needed;
-- a pack that had to be downloaded is kept there, as `<folder>/Games/B/BomberBob_v1.1_1628.lha`
-  (the set, the letter, the pack - like the server's folders), for the next machine;
+- a pack that had to be downloaded is kept there, as `<folder>/Games/BomberBob_v1.1_1628.lha`
+  (`Games`, `Beta-Game`, `Demos`, `Beta-Demo` or `Magazines`, then the pack - the layout the
+  PC download tools use, so a folder they filled works as it is), for the next machine;
 - **Project > Download marked to the pack folder** (`FETCH` in a Shell) downloads the packs of
   the marked games into the pack folder only, without updating anything: one machine fetches,
   the others update from the folder.
 
-Packs already in the folder as `<folder>/B/<pack>` or `<folder>/<pack>` are found too, so a
-drawer of packs from elsewhere works. Pack names can be longer than the 30 characters an
+Packs in the folder as `<folder>/Games/B/<pack>`, `<folder>/B/<pack>` or `<folder>/<pack>`
+are found too, so a drawer of packs sorted another way works. Pack names can be longer than the 30 characters an
 FFS or OFS volume without long names allows: use PFS, SFS, long-name FFS (DOS\7) or a
 network share for the folder.
 

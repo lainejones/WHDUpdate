@@ -23,17 +23,20 @@
 #define MAXZIP      (4UL * 1024 * 1024)
 #define SLAVEMAX    65536L
 
+/* The pack folder's drawers are named as the PC download tools name them
+ * (Games, Beta-Game, Demos, Beta-Demo, Magazines), so a folder they filled
+ * works as it is. */
 const PackSet pack_sets[NSETS] = {
     {"Games", "Commodore Amiga - WHDLoad - Games (",
-     "Commodore_Amiga_-_WHDLoad_-_Games", "Games", FAM_GAMES},
+     "Commodore_Amiga_-_WHDLoad_-_Games", "Games", "Games", FAM_GAMES},
     {"Games - Beta & Unofficial", "Commodore Amiga - WHDLoad - Games - Beta & Unofficial (",
-     "Commodore_Amiga_-_WHDLoad_-_Games_-_Beta_&_Unofficial", "GamesBeta", FAM_GAMES},
+     "Commodore_Amiga_-_WHDLoad_-_Games_-_Beta_&_Unofficial", "GamesBeta", "Beta-Game", FAM_GAMES},
     {"Demos", "Commodore Amiga - WHDLoad - Demos (",
-     "Commodore_Amiga_-_WHDLoad_-_Demos", "Demos", FAM_DEMOS},
+     "Commodore_Amiga_-_WHDLoad_-_Demos", "Demos", "Demos", FAM_DEMOS},
     {"Demos - Beta & Unofficial", "Commodore Amiga - WHDLoad - Demos - Beta & Unofficial (",
-     "Commodore_Amiga_-_WHDLoad_-_Demos_-_Beta_&_Unofficial", "DemosBeta", FAM_DEMOS},
+     "Commodore_Amiga_-_WHDLoad_-_Demos_-_Beta_&_Unofficial", "DemosBeta", "Beta-Demo", FAM_DEMOS},
     {"Magazines", "Commodore Amiga - WHDLoad - Magazines (",
-     "Commodore_Amiga_-_WHDLoad_-_Magazines", "Magazines", FAM_MAGS},
+     "Commodore_Amiga_-_WHDLoad_-_Magazines", "Magazines", "Magazines", FAM_MAGS},
 };
 
 /* ---- files ------------------------------------------------------------ */
@@ -1077,7 +1080,7 @@ static int conf_for(Engine *e, const Pack *p, BPTR log, UpdateConf *c, const cha
     c->webdir = e->prefs.webdir;
     c->ftpdir = e->prefs.ftpdir;
     c->setdir = pack_sets[p->set].dir;
-    c->setkey = pack_sets[p->set].key;
+    c->setkey = pack_sets[p->set].store;
     c->packdir = e->prefs.packdir;
     c->ftp_only = e->prefs.ftp_only;
     c->log = log;

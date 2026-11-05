@@ -18,6 +18,7 @@ typedef struct {
     const char *zipname;    /* the DAT zip's name up to the date */
     const char *dir;        /* its folder on the server */
     const char *key;        /* its saved pack list: PROGDIR:Cache/<key>.zip */
+    const char *store;      /* its drawer in the pack folder: <packdir>/<store>/<pack> */
     int family;
 } PackSet;
 extern const PackSet pack_sets[NSETS];
