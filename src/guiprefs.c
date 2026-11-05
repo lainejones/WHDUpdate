@@ -1,4 +1,4 @@
-/* guiprefs.c - the Settings pages of the window: Server, Pack sets,
+/* guiprefs.c - the Settings pages of the window: Server (with the pack folder), Pack sets,
  * Languages and Systems. Each is a small window of its own over the main
  * one, with Use and Cancel; laid out from the font like the main window, so
  * they fit a 640x200 screen with Topaz 8 too. */
@@ -357,7 +357,7 @@ int prefs_sets(const PrefsUI *ui, Prefs *p)
 static const char *preset_labels[] = {"Turran (ftp2.grandis.nu)", "Turran (ftp.grandis.nu)",
                                       "Other", NULL};
 static const char *preset_hosts[] = {"ftp2.grandis.nu", "ftp.grandis.nu"};
-enum { S_HOST, S_WEB, S_FTP, S_USER, S_PASS, S_FTPONLY, S_COUNT };
+enum { S_HOST, S_WEB, S_FTP, S_USER, S_PASS, S_PACKDIR, S_FTPONLY, S_COUNT };
 
 static void server_gadget(Page *pg, int id, UWORD code, void *ctx)
 {
@@ -375,11 +375,13 @@ static void server_gadget(Page *pg, int id, UWORD code, void *ctx)
 
 int prefs_server(const PrefsUI *ui, Prefs *p)
 {
-    static const char *labels[] = {"Server", "HTTP folder", "FTP folder", "FTP user", "FTP password"};
+    static const char *labels[] = {"Server", "HTTP folder", "FTP folder", "FTP user", "FTP password",
+                                   "Pack folder"};
+    static const int maxc[] = {79, 159, 159, 39, 39, 159};
     Page pg;
     struct NewGadget ng;
     struct Gadget *gad;
-    char *vals[5];
+    char *vals[6];
     int i, lw = 0, w, h, rowh, ok = 0, preset = 2, y;
     struct TextFont *f = OpenFont(ui->ta);
     struct RastPort rp;
@@ -388,7 +390,7 @@ int prefs_server(const PrefsUI *ui, Prefs *p)
         return 0;
     InitRastPort(&rp);
     SetFont(&rp, f);
-    for (i = 0; i < 5; i++) {
+    for (i = 0; i < 6; i++) {
         int l = TextLength(&rp, (STRPTR)labels[i], strlen(labels[i]));
         if (l > lw)
             lw = l;
@@ -404,10 +406,11 @@ int prefs_server(const PrefsUI *ui, Prefs *p)
     vals[2] = p->ftpdir;
     vals[3] = p->user;
     vals[4] = p->pass;
+    vals[5] = p->packdir;
     w = 2 * M + lw + 360;
     if (w > ui->scr->Width - 20)
         w = ui->scr->Width - 20;
-    h = 4 + 7 * rowh + 6 + (ui->ta->ta_YSize + 6) + 4;
+    h = 4 + 8 * rowh + 6 + (ui->ta->ta_YSize + 6) + 4;
     if (!page_open(&pg, ui, "WHDUpdate: Server", w, h))
         return 0;
     gad = CreateContext(&pg.glist);
@@ -424,21 +427,21 @@ int prefs_server(const PrefsUI *ui, Prefs *p)
     ng.ng_GadgetID = ID_PRESET;
     gad = CreateGadget(CYCLE_KIND, gad, &ng, GTCY_Labels, (ULONG)preset_labels,
                        GTCY_Active, preset, TAG_END);
-    for (i = 0; i < 5; i++) {
+    for (i = 0; i < 6; i++) {
         ng.ng_TopEdge = y + (i + 1) * rowh;
         ng.ng_GadgetText = (UBYTE *)labels[i];
         ng.ng_GadgetID = ID_FIRST + i;
         pg.g[i] = gad = CreateGadget(STRING_KIND, gad, &ng, GTST_String, (ULONG)vals[i],
-                                     GTST_MaxChars, i < 3 ? (i ? 159 : 79) : 39, TAG_END);
+                                     GTST_MaxChars, maxc[i], TAG_END);
     }
-    ng.ng_TopEdge = y + 6 * rowh + (bh(&pg) - 11) / 2;
+    ng.ng_TopEdge = y + 7 * rowh + (bh(&pg) - 11) / 2;
     ng.ng_Width = 26;
     ng.ng_Height = 11;
     ng.ng_GadgetText = (UBYTE *)"Use FTP only";
     ng.ng_GadgetID = ID_FIRST + S_FTPONLY;
     ng.ng_Flags = PLACETEXT_RIGHT;
     pg.g[S_FTPONLY] = gad = CreateGadget(CHECKBOX_KIND, gad, &ng, GTCB_Checked, p->ftp_only, TAG_END);
-    gad = buttons(&pg, gad, 4 + 7 * rowh + 6, w, 0);
+    gad = buttons(&pg, gad, 4 + 8 * rowh + 6, w, 0);
     if (gad) {
         page_show(&pg);
         if ((ok = page_run(&pg, server_gadget, NULL)) != 0) {
@@ -447,6 +450,7 @@ int prefs_server(const PrefsUI *ui, Prefs *p)
             strncpy(p->ftpdir, str_of(pg.g[S_FTP]), sizeof(p->ftpdir) - 1);
             strncpy(p->user, str_of(pg.g[S_USER]), sizeof(p->user) - 1);
             strncpy(p->pass, str_of(pg.g[S_PASS]), sizeof(p->pass) - 1);
+            strncpy(p->packdir, str_of(pg.g[S_PACKDIR]), sizeof(p->packdir) - 1);
             p->ftp_only = checked(&pg, pg.g[S_FTPONLY]);
         }
     }

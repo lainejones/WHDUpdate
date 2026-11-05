@@ -7,6 +7,9 @@
 typedef struct {
     const char *host, *webdir, *ftpdir, *setdir;  /* where the packs are */
     int ftp_only;
+    /* The pack folder ("" or NULL = none): packs are taken from there, and
+     * the downloaded ones kept there, as <packdir>/<setkey>/<letter>/<pack>. */
+    const char *packdir, *setkey;
     BPTR log;                                     /* WHDUpdate.log, or 0 */
     /* The new pack needs a Kickstart image (kick = its name, "31034.a1000")
      * that is not in DEVS:Kickstarts, and the copy installed now didn't:
@@ -50,6 +53,26 @@ int copy_saves(const char *gamedir, const char *dest);
 /* What the slave in drawer dir says (found by listing the drawer).
  * 1 = there is one. */
 int drawer_slave(const char *dir, SlaveInfo *si);
+
+/* Download pack p into the pack folder only (nothing installed): for the
+ * other machines that share it. 0 = downloaded, 1 = it was there already,
+ * -1 = failed (said why), -2 = stopped. */
+int fetch_to_folder(const UpdateConf *c, const Pack *p);
+
+/* What Verify found. */
+typedef struct {
+    int files;              /* in the pack */
+    int missing;            /* not in the game's drawer */
+    int differ;             /* there but not the same (icons and saves aside) */
+    int disks;              /* disk images that differ: saved games, most likely */
+    char missing_list[160], differ_list[160];   /* the first few of them */
+} VerifyResult;
+
+/* Compare the game in drawer path with pack p, file by file (the pack from
+ * the pack folder, or downloaded): icons, saves and ArchiveName.txt aside.
+ * 0 = it is all there, 1 = files missing or different (in *r), -1 = failed,
+ * -2 = stopped. */
+int verify_game(const UpdateConf *c, const char *path, const Pack *p, VerifyResult *r);
 
 /* Free bytes on the volume path is on. */
 unsigned long volume_free(const char *path);

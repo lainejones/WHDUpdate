@@ -76,6 +76,16 @@ static int save_file(const char *name, const void *data, unsigned long len)
     return ok;
 }
 
+/* strcmp, ignoring the case of A-Z (no utility.library needed) */
+static int lower(int c) { return c >= 'A' && c <= 'Z' ? c | 32 : c; }
+
+static int stricmp_ascii(const char *a, const char *b)
+{
+    for (; *a && lower((unsigned char)*a) == lower((unsigned char)*b); a++, b++)
+        ;
+    return lower((unsigned char)*a) - lower((unsigned char)*b);
+}
+
 /* ---- the settings ------------------------------------------------------ */
 
 void prefs_default(Prefs *p)
@@ -139,6 +149,7 @@ void prefs_load(Prefs *p)
         else if (!strcmp(line, "GAMEDIRS"))   set_str(p->dirs[FAM_GAMES], sizeof(p->dirs[0]), v);
         else if (!strcmp(line, "DEMODIRS"))   set_str(p->dirs[FAM_DEMOS], sizeof(p->dirs[0]), v);
         else if (!strcmp(line, "MAGDIRS"))    set_str(p->dirs[FAM_MAGS], sizeof(p->dirs[0]), v);
+        else if (!strcmp(line, "PACKDIR"))    set_str(p->packdir, sizeof(p->packdir), v);
     }
     free(buf);
     if (!p->sets)
@@ -153,9 +164,10 @@ static int prefs_write(const Prefs *p, int keep)
         return 0;
     n = snprintf(buf, 4096,
                  "HOST=%s\nWEBDIR=%s\nFTPDIR=%s\nFTPUSER=%s\nFTPPASS=%s\nFTPONLY=%d\n"
-                 "SETS=%lx\nALLOWED=%lx\nGAMEDIRS=%s\nDEMODIRS=%s\nMAGDIRS=%s\n",
+                 "SETS=%lx\nALLOWED=%lx\nGAMEDIRS=%s\nDEMODIRS=%s\nMAGDIRS=%s\nPACKDIR=%s\n",
                  p->host, p->webdir, p->ftpdir, p->user, p->pass, p->ftp_only,
-                 p->sets, p->allowed, p->dirs[FAM_GAMES], p->dirs[FAM_DEMOS], p->dirs[FAM_MAGS]);
+                 p->sets, p->allowed, p->dirs[FAM_GAMES], p->dirs[FAM_DEMOS], p->dirs[FAM_MAGS],
+                 p->packdir);
     if (n > 0 && n < 4096) {
         ok = save_file("ENV:" PREFSNAME, buf, n);
         if (keep)
@@ -1052,25 +1064,34 @@ BPTR engine_open_log(void)
     return log;
 }
 
+/* Where pack p comes from, for update.c. 0 = it can't come from anywhere
+ * (no network and no pack folder; said so, with what for). */
+static int conf_for(Engine *e, const Pack *p, BPTR log, UpdateConf *c, const char *what)
+{
+    if (!SocketBase && !e->prefs.packdir[0]) {
+        say("%s needs the network (no bsdsocket.library) or a pack folder.", what);
+        return 0;
+    }
+    memset(c, 0, sizeof(*c));
+    c->host = e->prefs.host;
+    c->webdir = e->prefs.webdir;
+    c->ftpdir = e->prefs.ftpdir;
+    c->setdir = pack_sets[p->set].dir;
+    c->setkey = pack_sets[p->set].key;
+    c->packdir = e->prefs.packdir;
+    c->ftp_only = e->prefs.ftp_only;
+    c->log = log;
+    c->kick_ask = e->kick_ask;
+    ftp_login(e->prefs.user, e->prefs.pass);
+    return 1;
+}
+
 int engine_update(Engine *e, Game *g, BPTR log)
 {
     UpdateConf c;
     int rc;
-    if (!g->pack)
+    if (!g->pack || !conf_for(e, g->pack, log, &c, "Updating"))
         return -1;
-    if (!SocketBase) {
-        say("Updating needs the network (no bsdsocket.library).");
-        return -1;
-    }
-    memset(&c, 0, sizeof(c));
-    c.host = e->prefs.host;
-    c.webdir = e->prefs.webdir;
-    c.ftpdir = e->prefs.ftpdir;
-    c.setdir = pack_sets[g->pack->set].dir;
-    c.ftp_only = e->prefs.ftp_only;
-    c.log = log;
-    c.kick_ask = e->kick_ask;
-    ftp_login(e->prefs.user, e->prefs.pass);
     rc = update_game(&c, g->path, g->pack, g->installed);
     if (rc == 1)
         g->marked = 0;
@@ -1082,6 +1103,45 @@ int engine_update(Engine *e, Game *g, BPTR log)
         g->marked = 0;
     }
     return rc;
+}
+
+int engine_fetch(Engine *e, const Game *g, BPTR log)
+{
+    UpdateConf c;
+    if (!g->pack || !e->prefs.packdir[0] || !conf_for(e, g->pack, log, &c, "Downloading"))
+        return -1;
+    return fetch_to_folder(&c, g->pack);
+}
+
+const Pack *engine_installed_pack(Engine *e, const Game *g)
+{
+    char name[600], line[120];
+    BPTR fh;
+    long i;
+    if (!g->path)
+        return NULL;
+    snprintf(name, sizeof(name), "%s/ArchiveName.txt", g->path);
+    if ((fh = Open((STRPTR)name, MODE_OLDFILE)) != 0) {
+        LONG n = Read(fh, line, sizeof(line) - 1);
+        Close(fh);
+        if (n > 0) {
+            line[n] = 0;
+            line[strcspn(line, "\r\n")] = 0;
+            for (i = 0; i < e->ix.n; i++)
+                if (!stricmp_ascii(e->ix.packs[i].file, line))
+                    return &e->ix.packs[i];
+        }
+    }
+    return g->status == M_CURRENT ? g->pack : NULL;
+}
+
+int engine_verify(Engine *e, const Game *g, BPTR log, VerifyResult *r)
+{
+    UpdateConf c;
+    const Pack *p = engine_installed_pack(e, g);
+    if (!p || !conf_for(e, p, log, &c, "Verify"))
+        return -1;
+    return verify_game(&c, g->path, p, r);
 }
 
 int engine_unwanted(const Engine *e, const Game *g)
@@ -1426,20 +1486,9 @@ int engine_install(Engine *e, long i, const char *dest, BPTR log)
     UpdateConf c;
     char path[600];
     int rc;
-    if (g->status != M_MISSING || !g->pack)
+    if (g->status != M_MISSING || !g->pack || !conf_for(e, g->pack, log, &c, "Installing"))
         return -1;
-    if (!SocketBase) {
-        say("Installing needs the network (no bsdsocket.library).");
-        return -1;
-    }
-    memset(&c, 0, sizeof(c));
-    c.host = e->prefs.host;
-    c.webdir = e->prefs.webdir;
-    c.ftpdir = e->prefs.ftpdir;
-    c.setdir = pack_sets[g->pack->set].dir;
-    c.ftp_only = e->prefs.ftp_only;
-    c.log = log;
-    ftp_login(e->prefs.user, e->prefs.pass);
+    c.kick_ask = NULL;
     rc = install_game(&c, dest, g->name, g->pack, path, sizeof(path));
     if (rc)
         return rc;

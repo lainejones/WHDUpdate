@@ -16,6 +16,9 @@ WHDUpdate Games: FTP                 fetch the pack list by FTP
 WHDUpdate Games: UPDATE              update the games with a newer pack, asking for each
 WHDUpdate Games: UPDATE YES          ... without asking
 WHDUpdate Games: GAME=Lotus#?        only the games whose drawer name fits the pattern
+WHDUpdate Games: PACKS=Share:WHDPacks  the pack folder for this run (see The pack folder)
+WHDUpdate Games: FETCH               download the updates into the pack folder only
+WHDUpdate Games: VERIFY              compare each game with the pack it is from
 DEPTH=n                              how many drawer levels to look down (3)
 ```
 
@@ -61,6 +64,36 @@ their own drawers from **Settings**. The drawer gets an `ArchiveName.txt` naming
 (**All games** for all of them) into a drawer you pick, as `Saves-<date>/<game>/...`, in the
 same drawers as in the game. Disk images (`Disk.1` ...) are left out: in most packs they are the
 game itself, and a game that saves onto its disk keeps that inside the image.
+
+### The pack folder
+
+With several Amigas, each one downloading the same packs is slow and hard on the server. Set a
+**pack folder** that all of them can reach - a network share, or a drawer on a disk you move
+about - in **Settings > Server... > Pack folder** (or `PACKS=` in a Shell). Then:
+
+- a pack that is in the pack folder is taken from there, after its size and CRC are checked
+  against the pack list - no download, and no network needed;
+- a pack that had to be downloaded is kept there, as `<folder>/Games/B/BomberBob_v1.1_1628.lha`
+  (the set, the letter, the pack - like the server's folders), for the next machine;
+- **Project > Download marked to the pack folder** (`FETCH` in a Shell) downloads the packs of
+  the marked games into the pack folder only, without updating anything: one machine fetches,
+  the others update from the folder.
+
+Packs already in the folder as `<folder>/B/<pack>` or `<folder>/<pack>` are found too, so a
+drawer of packs from elsewhere works. Pack names can be longer than the 30 characters an
+FFS or OFS volume without long names allows: use PFS, SFS, long-name FFS (DOS\7) or a
+network share for the folder.
+
+### Verifying games
+
+**Project > Verify the clicked game** compares a game's drawer, file by file, with the pack
+it was installed from (the one its `ArchiveName.txt` names, else the newest pack when the
+game is current); **Verify the games shown** does it for every game the list shows. The pack
+comes from the pack folder, or is downloaded (and kept there). Icons, saves, high scores and
+`ArchiveName.txt` are not compared - those are yours - and a disk image that differs is
+counted apart: games save onto their disks. A game with files missing or changed is named in
+a requester, and the log lists the files; **Update** it or reinstall it to repair it. In a
+Shell, `VERIFY` checks every game found (use `GAME=` to pick some).
 
 ### Removing games you don't want
 
@@ -120,8 +153,9 @@ The return code is 5 (WARN) when there are updates.
 
 For each game you say yes to, WHDUpdate:
 
-1. downloads the pack into `<volume>:WHDUpdate-Old/.work/` and checks its size and CRC
-   against the pack list;
+1. takes the pack from the pack folder, or downloads it into `<volume>:WHDUpdate-Old/.work/`
+   (and keeps a copy in the pack folder); either way its size and CRC are checked against
+   the pack list;
 2. unpacks it there with `C:LhA` (`C:UNLZX` for the few `.lzx` packs); if the new version
    needs a Kickstart image that is not in `DEVS:Kickstarts` and the one you have didn't, it
    asks first (**Update anyway** or **Keep the old one**; in a Shell it asks with the update,
@@ -145,7 +179,7 @@ naming the pack (as WHDFetch writes it), which later checks trust over the slave
 pause between them, to go easy on the server.
 
 Needs Kickstart 2.04 or newer, any 680x0, and a TCP/IP stack with
-`bsdsocket.library` (not for `OFFLINE`).
+`bsdsocket.library` (not for `OFFLINE`, nor for updates whose packs are all in the pack folder).
 
 ## Installing
 

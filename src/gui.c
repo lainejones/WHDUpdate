@@ -67,7 +67,8 @@ static const char *set_labels[] = {"All sets", "Games", "Games Beta", "Demos", "
                                    "Magazines", NULL};
 
 enum { MN_CHECK = 1, MN_UPDATE, MN_ABOUT, MN_QUIT, MN_SERVER, MN_SETS, MN_LANG, MN_SYS, MN_FTPONLY,
-       MN_REMOVE, MN_INSTALL, MN_EXPORT, MN_KICKS, MN_UNDO, MN_SAVES, MN_RESCAN };
+       MN_REMOVE, MN_INSTALL, MN_EXPORT, MN_KICKS, MN_UNDO, MN_SAVES, MN_RESCAN, MN_FETCH,
+       MN_VERIFY, MN_VERIFYALL };
 
 static struct NewMenu menu_def[] = {
     {NM_TITLE, (STRPTR)"Project", NULL, 0, 0, NULL},
@@ -77,6 +78,9 @@ static struct NewMenu menu_def[] = {
     {NM_ITEM, (STRPTR)"Remove marked...", (STRPTR)"R", 0, 0, (APTR)MN_REMOVE},
     {NM_ITEM, (STRPTR)"Install marked...", (STRPTR)"I", 0, 0, (APTR)MN_INSTALL},
     {NM_ITEM, (STRPTR)"Undo update of the clicked game...", (STRPTR)"Z", 0, 0, (APTR)MN_UNDO},
+    {NM_ITEM, (STRPTR)"Download marked to the pack folder", (STRPTR)"D", 0, 0, (APTR)MN_FETCH},
+    {NM_ITEM, (STRPTR)"Verify the clicked game", (STRPTR)"V", 0, 0, (APTR)MN_VERIFY},
+    {NM_ITEM, (STRPTR)"Verify the games shown...", NULL, 0, 0, (APTR)MN_VERIFYALL},
     {NM_ITEM, NM_BARLABEL, NULL, 0, 0, NULL},
     {NM_ITEM, (STRPTR)"Save list as CSV...", (STRPTR)"E", 0, 0, (APTR)MN_EXPORT},
     {NM_ITEM, (STRPTR)"Find Kickstart images...", (STRPTR)"K", 0, 0, (APTR)MN_KICKS},
@@ -1316,6 +1320,140 @@ static void do_undo(void)
     set_summary();
 }
 
+/* Download marked to the pack folder: the packs of the games marked for
+ * updating, into the pack folder only - another machine sharing the folder
+ * then updates from there without downloading. */
+static void do_fetch(void)
+{
+    Engine *e = G.e;
+    long i, n = 0, k = 0, got = 0, had = 0, failed = 0;
+    BPTR log;
+
+    if (!e->prefs.packdir[0]) {
+        gui_status("Set a pack folder first: Settings > Server..., Pack folder");
+        return;
+    }
+    for (i = 0; i < e->n; i++)
+        n += e->games[i]->marked && e->games[i]->path && e->games[i]->pack;
+    if (!n) {
+        gui_status("Mark the games first: their packs are downloaded into the pack folder");
+        return;
+    }
+    set_busy(1);
+    log = engine_open_log();
+    for (i = 0; i < e->n && !G.stop; i++) {
+        Game *g = e->games[i];
+        if (!g->marked || !g->path || !g->pack)
+            continue;
+        say("(%ld/%ld) %s", ++k, n, g->pack->file);
+        switch (engine_fetch(e, g, log)) {
+        case 0: got++; Delay(100); break;     /* go easy on the server */
+        case 1: had++; break;
+        case -2: break;
+        default: failed++;
+        }
+    }
+    if (log)
+        Close(log);
+    set_busy(0);
+    say("%ld downloaded, %ld there already, %ld failed%s - pack folder %s", got, had, failed,
+        G.stop ? " (stopped)" : "", e->prefs.packdir);
+}
+
+/* Verify: the clicked game, or (all) every game the list shows, against
+ * the pack each is installed from; what differs goes to the log, and a
+ * requester names the games with missing or changed files. */
+static void do_verify(int all)
+{
+    Engine *e = G.e;
+    struct EasyStruct es;
+    VerifyResult r;
+    char body[700], bad[400];
+    long i, n = 0, k = 0, ok = 0, nbad = 0, failed = 0;
+    BPTR log;
+
+    memset(&es, 0, sizeof(es));
+    es.es_StructSize = sizeof(es);
+    es.es_Title = (UBYTE *)"WHDUpdate: Verify";
+    if (!all) {
+        Game *g = G.sel;
+        if (!g || !g->path) {
+            gui_status("Click the game first (any view), then Verify");
+            return;
+        }
+        if (!engine_installed_pack(e, g)) {
+            say("%s: no known pack to compare with (update it first, or Check)", g->name);
+            return;
+        }
+        set_busy(1);
+        log = engine_open_log();
+        k = engine_verify(e, g, log, &r);
+        if (log)
+            Close(log);
+        set_busy(0);
+        if (k == 0)
+            say("%s: all %d files are as in the pack%s", g->name, r.files,
+                r.disks ? " (disk images differ: saved games)" : "");
+        else if (k == 1) {
+            snprintf(body, sizeof(body), "%s\n\n%d of %d files missing%s%s\n%d differ%s%s\n\n"
+                     "(icons and saves are not compared)", g->path, r.missing, r.files,
+                     r.missing ? ": " : "", r.missing_list, r.differ, r.differ ? ": " : "", r.differ_list);
+            es.es_TextFormat = (UBYTE *)body;
+            es.es_GadgetFormat = (UBYTE *)"OK";
+            EasyRequestArgs(G.win, &es, NULL, NULL);
+            say("%s: %d missing, %d differ - Update or reinstall it to repair", g->name, r.missing, r.differ);
+        } else if (k != -2)
+            say("%s could not be verified (log: %s)", g->name, LOGFILE);
+        return;
+    }
+    for (i = 0; i < e->n; i++)
+        n += shown(e->games[i]) && e->games[i]->path && engine_installed_pack(e, e->games[i]);
+    if (!n) {
+        gui_status("None of the games shown has a known pack to compare with");
+        return;
+    }
+    snprintf(body, sizeof(body), "Verify %ld game%s against their packs?\n\n"
+             "Packs not in the pack folder are downloaded%s.", n, n == 1 ? "" : "s",
+             e->prefs.packdir[0] ? " (and kept there)" : "");
+    es.es_TextFormat = (UBYTE *)body;
+    es.es_GadgetFormat = (UBYTE *)"Verify|Cancel";
+    if (!EasyRequestArgs(G.win, &es, NULL, NULL))
+        return;
+    bad[0] = 0;
+    set_busy(1);
+    log = engine_open_log();
+    for (i = 0; i < e->n && !G.stop; i++) {
+        Game *g = e->games[i];
+        if (!shown(g) || !g->path || !engine_installed_pack(e, g))
+            continue;
+        say("(%ld/%ld) verifying %s", ++k, n, g->name);
+        switch (engine_verify(e, g, log, &r)) {
+        case 0: ok++; break;
+        case 1:
+            if (nbad++ < 8) {
+                strncat(bad, "\n", sizeof(bad) - strlen(bad) - 1);
+                strncat(bad, g->path, sizeof(bad) - strlen(bad) - 1);
+            }
+            break;
+        case -2: break;
+        default: failed++;
+        }
+    }
+    if (log)
+        Close(log);
+    set_busy(0);
+    say("Verified %ld: %ld OK, %ld with missing or changed files, %ld failed%s (log: %s)", ok + nbad + failed,
+        ok, nbad, failed, G.stop ? ", stopped" : "", LOGFILE);
+    if (nbad) {
+        snprintf(body, sizeof(body), "%ld game%s with missing or changed files:%s%s\n\n"
+                 "The log (%s) lists the files.", nbad, nbad == 1 ? "" : "s", bad,
+                 nbad > 8 ? "\n..." : "", LOGFILE);
+        es.es_TextFormat = (UBYTE *)body;
+        es.es_GadgetFormat = (UBYTE *)"OK";
+        EasyRequestArgs(G.win, &es, NULL, NULL);
+    }
+}
+
 /* "Saves-2026-11-04" for today. */
 static void saves_name(char *out, int size)
 {
@@ -1542,6 +1680,9 @@ static void do_menu(ULONG id, struct MenuItem *it)
     case MN_KICKS: do_kicks(); break;
     case MN_UNDO: do_undo(); break;
     case MN_SAVES: do_saves(); break;
+    case MN_FETCH: do_fetch(); break;
+    case MN_VERIFY: do_verify(0); break;
+    case MN_VERIFYALL: do_verify(1); break;
     case MN_ABOUT:  about(); break;
     case MN_QUIT:   G.quit = 1; break;
     case MN_FTPONLY:

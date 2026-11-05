@@ -19,6 +19,11 @@
  *                               for each one (YES: without asking)
  *   WHDUpdate Games: GAME=Lotus#?   only the games whose drawer name fits
  *   WHDUpdate Games: RESCAN     forget the scan cache: read every drawer again
+ *   WHDUpdate Games: PACKS=Share:WHDPacks   the pack folder for this run: packs
+ *                               are taken from there, downloads kept there
+ *   WHDUpdate Games: FETCH      download the updates into the pack folder only
+ *                               (for the other machines; nothing installed)
+ *   WHDUpdate Games: VERIFY     compare each game with the pack it is from
  *   WHDUpdate GUI               the window
  *
  * Return code 5 (WARN) when there are updates, 0 when there are none. */
@@ -43,9 +48,10 @@ static const char verstag[] __attribute__((used)) =
 struct Library *SocketBase = NULL;
 struct Library *IconBase = NULL;
 
-#define TEMPLATE "DIR/M,ALL/S,UPDATE/S,YES/S,GAME/K,SHOWALL/S,REPORT/K,OFFLINE/S,FTP/S,DEPTH/K/N,GUI/S,RESCAN/S"
+#define TEMPLATE "DIR/M,ALL/S,UPDATE/S,YES/S,GAME/K,SHOWALL/S,REPORT/K,OFFLINE/S,FTP/S,DEPTH/K/N,GUI/S," \
+                 "RESCAN/S,PACKS/K,FETCH/S,VERIFY/S"
 enum { A_DIR, A_ALL, A_UPDATE, A_YES, A_GAME, A_SHOWALL, A_REPORT, A_OFFLINE, A_FTP, A_DEPTH,
-       A_GUI, A_RESCAN, A_COUNT };
+       A_GUI, A_RESCAN, A_PACKS, A_FETCH, A_VERIFY, A_COUNT };
 
 static int gui_on;
 
@@ -215,6 +221,94 @@ static int cli_updates(Engine *e, int yes)
     return failed ? -1 : 0;
 }
 
+/* FETCH: the packs of the games with an update into the pack folder. */
+static int cli_fetch(Engine *e)
+{
+    BPTR log;
+    long i;
+    int got = 0, had = 0, failed = 0, n = 0, total = 0;
+
+    if (!e->prefs.packdir[0]) {
+        printf("FETCH needs a pack folder: PACKS=drawer, or set one in the window's Settings > Server.\n");
+        return -1;
+    }
+    for (i = 0; i < e->n; i++)
+        total += e->games[i]->status == M_UPDATE;
+    if (!total) {
+        printf("Nothing to download.\n");
+        return 0;
+    }
+    log = engine_open_log();
+    printf("\nDownloading %d pack(s) into %s\n", total, e->prefs.packdir);
+    for (i = 0; i < e->n; i++) {
+        Game *g = e->games[i];
+        if (g->status != M_UPDATE)
+            continue;
+        printf("(%d/%d) %s\n", ++n, total, g->pack->file);
+        fflush(stdout);
+        switch (engine_fetch(e, g, log)) {
+        case 0: got++; Delay(100); break;     /* go easy on the server */
+        case 1: had++; break;
+        case -2: printf("*** Stopped.\n"); i = e->n; break;
+        default: failed++;
+        }
+    }
+    if (log)
+        Close(log);
+    printf("\n%d downloaded, %d there already, %d failed.\n", got, had, failed);
+    return failed ? -1 : 0;
+}
+
+/* VERIFY: every game whose pack is known, against that pack. */
+static int cli_verify(Engine *e)
+{
+    BPTR log = engine_open_log();
+    VerifyResult r;
+    long i;
+    int ok = 0, bad = 0, failed = 0, unknown = 0;
+
+    printf("\n");
+    for (i = 0; i < e->n; i++) {
+        Game *g = e->games[i];
+        if (!g->path)
+            continue;
+        if (!engine_installed_pack(e, g)) {
+            unknown++;
+            continue;
+        }
+        printf("%s: ", g->path);
+        fflush(stdout);
+        switch (engine_verify(e, g, log, &r)) {
+        case 0:
+            ok++;
+            printf("OK (%d files%s)\n", r.files, r.disks ? ", disk images differ: saves" : "");
+            break;
+        case 1:
+            bad++;
+            printf("%d of %d files missing, %d differ\n", r.missing, r.files, r.differ);
+            if (r.missing)
+                printf("  missing: %s\n", r.missing_list);
+            if (r.differ)
+                printf("  differ:  %s\n", r.differ_list);
+            break;
+        case -2:
+            printf("*** Stopped.\n");
+            i = e->n;
+            break;
+        default:
+            failed++;
+            printf("could not be checked\n");
+        }
+        fflush(stdout);
+    }
+    if (log)
+        Close(log);
+    printf("\n%d OK, %d with missing or changed files, %d not checked (failed),\n"
+           "%d skipped (an update is waiting, or the pack it is from is not known).\n",
+           ok, bad, failed, unknown);
+    return bad || failed ? -1 : 0;
+}
+
 static int cli(Engine *e, LONG *args)
 {
     Out out;
@@ -281,8 +375,12 @@ static int cli(Engine *e, LONG *args)
         printf("\"check\": the two versions can be read either way (1.51 vs 1.6).\n");
     if (e->st[M_UPDATE])
         rc = RETURN_WARN;
-    if (args[A_UPDATE] && !stopped)
+    if (args[A_FETCH] && !stopped)
+        rc = cli_fetch(e) == 0 ? RETURN_OK : RETURN_WARN;
+    else if (args[A_UPDATE] && !stopped)
         rc = cli_updates(e, args[A_YES] != 0) == 0 ? RETURN_OK : RETURN_WARN;
+    if (args[A_VERIFY] && !stopped)
+        rc = cli_verify(e) == 0 ? rc : RETURN_WARN;
     return rc;
 }
 
@@ -371,7 +469,8 @@ static int whdu_main(void)
             printf("WHDUpdate " WHDU_VERSION " - keeps your WHDLoad games up to date.\n"
                    "Name the drawers your games are in, or ALL for every volume:\n"
                    "  WHDUpdate Games:  [UPDATE [YES]] [GAME=pattern] [SHOWALL] [REPORT=file]\n"
-                   "                    [OFFLINE] [FTP] [DEPTH=n]\n"
+                   "                    [OFFLINE] [FTP] [DEPTH=n] [RESCAN]\n"
+                   "                    [PACKS=drawer] [FETCH] [VERIFY]\n"
                    "  WHDUpdate GUI     the window (also from the icon)\n");
             TMARK("usage printed");
             FreeArgs(rda);
@@ -392,6 +491,10 @@ static int whdu_main(void)
         }
         if (args[A_FTP])
             e.prefs.ftp_only = 1;
+        if (args[A_PACKS]) {
+            strncpy(e.prefs.packdir, (char *)args[A_PACKS], sizeof(e.prefs.packdir) - 1);
+            e.prefs.packdir[sizeof(e.prefs.packdir) - 1] = 0;
+        }
     }
     IconBase = OpenLibrary((STRPTR)"icon.library", 37);
     if (!args[A_OFFLINE]) {

@@ -7,6 +7,7 @@
 #include <exec/nodes.h>
 #include <dos/dos.h>
 #include "match.h"
+#include "update.h"
 
 /* The pack sets on the server. A beta set belongs to its family: its packs
  * are matched against the same drawers as the main set's. */
@@ -31,6 +32,7 @@ typedef struct {
     unsigned long sets;     /* bit per pack set in use */
     unsigned long allowed;  /* variant words an unlabelled drawer may get */
     char dirs[NFAMS][400];  /* drawers per family, ';' between them */
+    char packdir[160];      /* the pack folder the machines share, "" = none (update.h) */
 } Prefs;
 
 void prefs_default(Prefs *p);
@@ -121,6 +123,16 @@ void engine_missing(Engine *e);
  * you lack, and kick_ask said keep it). log = an open WHDUpdate.log or 0. */
 int  engine_update(Engine *e, Game *g, BPTR log);
 BPTR engine_open_log(void);
+/* Download g's newest pack into the pack folder only, for the machines
+ * that share it. 0 = downloaded, 1 = there already, -1 = failed, -2 = stopped. */
+int  engine_fetch(Engine *e, const Game *g, BPTR log);
+/* The pack g is installed from: the one its ArchiveName.txt names, else
+ * its newest pack when it is current. NULL = not known. */
+const Pack *engine_installed_pack(Engine *e, const Game *g);
+/* Compare g's drawer with the pack it is installed from (verify_game).
+ * 0 = all there, 1 = files missing or different (*r), -1 = failed or no
+ * pack known, -2 = stopped. */
+int  engine_verify(Engine *e, const Game *g, BPTR log, VerifyResult *r);
 
 /* Is g installed from a pack whose language or system the settings turn off? */
 int  engine_unwanted(const Engine *e, const Game *g);

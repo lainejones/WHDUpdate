@@ -3,8 +3,9 @@
  * Everything happens on the game's own volume, so the swap at the end is a
  * pair of Rename()s and nothing is copied twice:
  *
- *   1. download the pack into <volume>:WHDUpdate-Old/.work/, check its
- *      size and CRC against the DAT
+ *   1. take the pack from the pack folder, or download it into
+ *      <volume>:WHDUpdate-Old/.work/ (and keep a copy in the pack folder);
+ *      either way its size and CRC are checked against the DAT
  *   2. unpack it there with LhA (UNLZX for the few .lzx packs)
  *   3. copy the saves and high scores from the old drawer into the new one
  *   4. give the new icons the old ones' places and the tooltypes you added
@@ -26,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "slave.h"
+#include "dat.h"
 #include "update.h"
 #include "amiga.h"
 
@@ -690,16 +692,177 @@ int remove_game(BPTR log, const char *path, int keep)
     return 0;
 }
 
-/* Steps 1 and 2 on volume vol (with a colon): download p into
- * vol:WHDUpdate-Old/.work/, check it, unpack it there; the new drawer into
- * newdir (its name into newname). work = the work drawer, to delete after.
- * 0 = done, -1 = failed (said why; work deleted), -2 = stopped. */
+/* ---- the pack folder ------------------------------------------------------ */
+
+/* A drawer of packs that every machine can reach (a network share, say):
+ * a pack is taken from there when it is there, and one that had to be
+ * downloaded is kept there for the next machine, as
+ * <folder>/<set>/<letter>/<pack> - the server's layout, with the short set
+ * names (Games, GamesBeta ...). */
+static void pack_home(const UpdateConf *c, const Pack *p, char *out)
+{
+    char t[P];
+    cat_path(t, c->packdir, c->setkey);
+    if (t[0])
+        cat_path(t, t, p->folder);
+    if (t[0])
+        cat_path(out, t, p->file);
+    else
+        out[0] = 0;
+}
+
+/* The size and CRC-32 of the file at path. 0 = it can't be read. */
+static int file_crc(const char *path, unsigned long *size, unsigned long *crc)
+{
+    static UBYTE buf[16384];
+    BPTR fh = Open((STRPTR)path, MODE_OLDFILE);
+    LONG n;
+    *size = 0;
+    *crc = 0;
+    if (!fh)
+        return 0;
+    while ((n = Read(fh, buf, sizeof(buf))) > 0) {
+        *crc = crc32_update(*crc, buf, (unsigned long)n);
+        *size += (unsigned long)n;
+    }
+    Close(fh);
+    return n == 0;
+}
+
+/* Is pack p in the pack folder, whole (its size and CRC as the DAT says)?
+ * Looked for as <folder>/<set>/<letter>/<pack>, <folder>/<letter>/<pack> and
+ * <folder>/<pack>, so a drawer of packs from elsewhere works too. Its path
+ * into out. */
+static int local_pack(const UpdateConf *c, const Pack *p, char *out)
+{
+    char t[P];
+    unsigned long size, crc;
+    int i;
+    if (!c->packdir || !c->packdir[0])
+        return 0;
+    for (i = 0; i < 3; i++) {
+        if (i == 0)
+            pack_home(c, p, t);
+        else if (i == 1) {
+            cat_path(t, c->packdir, p->folder);
+            if (t[0])
+                cat_path(t, t, p->file);
+        } else
+            cat_path(t, c->packdir, p->file);
+        if (!t[0] || !exists(t))
+            continue;
+        busy("Checking %s in the pack folder", p->file);
+        if (file_crc(t, &size, &crc) && size == p->size && crc == p->crc) {
+            strcpy(out, t);
+            return 1;
+        }
+        say("  %s in the pack folder is not the one in the pack list (size or CRC) - not used", t);
+    }
+    return 0;
+}
+
+/* Make the drawers of the pack folder that p's home is in. */
+static int make_home_dirs(const UpdateConf *c, const Pack *p)
+{
+    char t[P];
+    int l = (int)strlen(c->packdir);
+    if (l >= P)
+        return 0;
+    strcpy(t, c->packdir);                    /* the folder itself, one level */
+    if (l > 1 && t[l - 1] == '/')
+        t[l - 1] = 0;
+    if (!make_dir(t))
+        return 0;
+    cat_path(t, c->packdir, c->setkey);
+    if (!t[0] || !make_dir(t))
+        return 0;
+    cat_path(t, t, p->folder);
+    return t[0] && make_dir(t);
+}
+
+/* A downloaded pack (at from): a copy into the pack folder. */
+static void keep_pack(const UpdateConf *c, const Pack *p, const char *from)
+{
+    char home[P];
+    if (!c->packdir || !c->packdir[0])
+        return;
+    pack_home(c, p, home);
+    if (!home[0] || !make_home_dirs(c, p) || !copy_file(from, home))
+        say("  could not keep %s in the pack folder %s", p->file, c->packdir);
+}
+
+/* Download pack p into the file at dest (HTTP, then FTP) and check it
+ * against the DAT. 0 = done, -1 = failed (said why; dest deleted), -2 =
+ * stopped. */
+static int download_pack(const UpdateConf *c, const Pack *p, const char *dest)
+{
+    char url[P], enc[P];
+    unsigned long got = 0, crc = 0;
+    BPTR fh;
+    int rc = -1;
+    if (!SocketBase) {
+        say("  %s is not in the pack folder, and there is no network to download it", p->file);
+        return -1;
+    }
+    if (!(fh = Open((STRPTR)dest, MODE_NEWFILE))) {
+        say("  cannot write %s", dest);
+        return -1;
+    }
+    if (!c->ftp_only) {
+        snprintf(url, sizeof(url), "%s%s/%s/%s", c->webdir, c->setdir, p->folder, p->file);
+        url_encode(url, enc, sizeof(enc));
+        rc = http_download(c->host, enc, fh, p->size, &got, &crc);
+    }
+    if (rc) {
+        Seek(fh, 0, OFFSET_BEGINNING);
+        SetFileSize(fh, 0, OFFSET_BEGINNING);
+        snprintf(url, sizeof(url), "%s%s/%s/%s", c->ftpdir, c->setdir, p->folder, p->file);
+        rc = ftp_download(c->host, url, fh, p->size, &got, &crc);
+    }
+    Close(fh);
+    if (break_pressed()) {
+        DeleteFile((STRPTR)dest);
+        return -2;
+    }
+    if (rc || got != p->size || crc != p->crc) {
+        say("  the download of %s failed or is damaged (%lu of %lu bytes)", p->file, got, p->size);
+        DeleteFile((STRPTR)dest);
+        return -1;
+    }
+    return 0;
+}
+
+int fetch_to_folder(const UpdateConf *c, const Pack *p)
+{
+    char home[P];
+    int rc;
+    if (!c->packdir || !c->packdir[0])
+        return -1;
+    if (local_pack(c, p, home))
+        return 1;
+    pack_home(c, p, home);
+    if (!home[0] || !make_home_dirs(c, p)) {
+        say("  cannot make the drawers for %s in %s", p->file, c->packdir);
+        return -1;
+    }
+    rc = download_pack(c, p, home);
+    if (rc == 0) {
+        char msg[P + 40];
+        snprintf(msg, sizeof(msg), "downloaded %s", home);
+        log_line(c, msg);
+    }
+    return rc;
+}
+
+/* Steps 1 and 2 on volume vol (with a colon): the pack from the pack folder,
+ * or downloaded into vol:WHDUpdate-Old/.work/ (and kept in the pack folder),
+ * unpacked there; the new drawer into newdir (its name into newname). work =
+ * the work drawer, to delete after. 0 = done, -1 = failed (said why; work
+ * deleted), -2 = stopped. */
 static int fetch_pack(const UpdateConf *c, const char *vol, const Pack *p, char *work,
                       char *newdir, char *newname)
 {
-    char olddir[P], pack[P], unp[P], url[P], enc[P], cmd[P * 2];
-    unsigned long got = 0, crc = 0;
-    BPTR fh;
+    char olddir[P], pack[P], unp[P], cmd[P * 2];
     int rc;
 
     cat_path(olddir, vol, OLDDIR);
@@ -719,32 +882,19 @@ static int fetch_pack(const UpdateConf *c, const char *vol, const Pack *p, char 
         goto fail;
     }
 
-    /* 1. download */
-    cat_path(pack, work, p->file);
-    if (!(fh = Open((STRPTR)pack, MODE_NEWFILE))) {
-        say("  cannot write %s", pack);
-        goto fail;
-    }
-    rc = -1;
-    if (!c->ftp_only) {
-        snprintf(url, sizeof(url), "%s%s/%s/%s", c->webdir, c->setdir, p->folder, p->file);
-        url_encode(url, enc, sizeof(enc));
-        rc = http_download(c->host, enc, fh, p->size, &got, &crc);
-    }
-    if (rc) {
-        Seek(fh, 0, OFFSET_BEGINNING);
-        SetFileSize(fh, 0, OFFSET_BEGINNING);
-        snprintf(url, sizeof(url), "%s%s/%s/%s", c->ftpdir, c->setdir, p->folder, p->file);
-        rc = ftp_download(c->host, url, fh, p->size, &got, &crc);
-    }
-    Close(fh);
-    if (break_pressed()) {
-        delete_tree(work);
-        return -2;
-    }
-    if (rc || got != p->size || crc != p->crc) {
-        say("  the download of %s failed or is damaged (%lu of %lu bytes)", p->file, got, p->size);
-        goto fail;
+    /* 1. the pack: from the pack folder, else downloaded (and kept there) */
+    if (local_pack(c, p, pack)) {
+        busy("%s: from the pack folder", p->file);
+    } else {
+        cat_path(pack, work, p->file);
+        rc = download_pack(c, p, pack);
+        if (rc == -2) {
+            delete_tree(work);
+            return -2;
+        }
+        if (rc)
+            goto fail;
+        keep_pack(c, p, pack);
     }
 
     /* 2. unpack */
@@ -1088,6 +1238,104 @@ static int copy_in(const char *gamedir, const char *dest)
     }
     UnLock(lock);
     return n;
+}
+
+/* ---- Verify ---------------------------------------------------------------- */
+
+static void note_file(char *list, int size, const char *rel)
+{
+    int l = (int)strlen(list);
+    if (l + (int)strlen(rel) + 3 >= size) {
+        if (l + 4 < size && !strstr(list, "..."))
+            strcat(list, ", ...");
+        return;
+    }
+    if (l)
+        strcat(list, ", ");
+    strcat(list, rel);
+}
+
+/* Every file of the pack's drawer pk/rel against the game's g/rel. */
+static int compare_tree(const char *pk, const char *g, const char *rel, VerifyResult *r)
+{
+    char pd[P], gd[P], pf[P], gf[P], sub[P];
+    BPTR lock;
+    struct FileInfoBlock *fib;
+    int stopped = 0;
+
+    cat_path(pd, pk, rel);
+    cat_path(gd, g, rel);
+    if (!(lock = Lock((STRPTR)pd, ACCESS_READ)))
+        return 0;
+    if ((fib = (struct FileInfoBlock *)AllocDosObject(DOS_FIB, NULL)) != NULL) {
+        if (Examine(lock, fib))
+            while (!stopped && ExNext(lock, fib)) {
+                const char *nm = (const char *)fib->fib_FileName;
+                if (rel[0])
+                    cat_path(sub, rel, nm);
+                else
+                    strcpy(sub, nm);
+                cat_path(pf, pd, nm);
+                cat_path(gf, gd, nm);
+                if (!sub[0] || !pf[0] || !gf[0])
+                    continue;
+                if (fib->fib_DirEntryType > 0) {
+                    stopped = compare_tree(pk, g, sub, r);
+                    continue;
+                }
+                r->files++;
+                if (break_pressed()) {
+                    stopped = 1;
+                    break;
+                }
+                if (!exists(gf)) {
+                    r->missing++;
+                    note_file(r->missing_list, sizeof(r->missing_list), sub);
+                } else if (ends_nocase(nm, ".info") || is_save(sub) ||
+                           !strcmp(nm, "ArchiveName.txt")) {
+                    /* icons are moved and given tooltypes, saves are the player's */
+                } else if (!same_content(pf, gf)) {
+                    if (is_disk(nm))
+                        r->disks++;           /* a disk the game saves to, maybe */
+                    else {
+                        r->differ++;
+                        note_file(r->differ_list, sizeof(r->differ_list), sub);
+                    }
+                }
+            }
+        FreeDosObject(DOS_FIB, fib);
+    }
+    UnLock(lock);
+    return stopped;
+}
+
+int verify_game(const UpdateConf *c, const char *path, const Pack *p, VerifyResult *r)
+{
+    char vol[P], work[P], newname[108], newdir[P], msg[P + 400];
+    const char *colon = strchr(path, ':');
+    int rc;
+
+    memset(r, 0, sizeof(*r));
+    if (!colon || strlen(path) > P - 40)
+        return -1;
+    memcpy(vol, path, colon + 1 - path);
+    vol[colon + 1 - path] = 0;
+    rc = fetch_pack(c, vol, p, work, newdir, newname);
+    if (rc)
+        return rc;
+    busy("Comparing %s with %s", path, p->file);
+    rc = compare_tree(newdir, path, "", r);
+    delete_tree(work);
+    if (rc)
+        return -2;
+    if (r->missing || r->differ)
+        snprintf(msg, sizeof(msg), "VERIFY %s against %s: of %d files, %d missing [%s], %d differ [%s]",
+                 path, p->file, r->files, r->missing, r->missing_list, r->differ, r->differ_list);
+    else
+        snprintf(msg, sizeof(msg), "verified %s against %s: %d files OK%s", path, p->file, r->files,
+                 r->disks ? " (some disk images differ - saved games, most likely)" : "");
+    log_line(c, msg);
+    return r->missing || r->differ ? 1 : 0;
 }
 
 int drawer_slave(const char *dir, SlaveInfo *si)
