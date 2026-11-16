@@ -25,7 +25,8 @@ DEPTH=n                              how many drawer levels to look down (3)
 ## The window
 
 Double-click the icon (or `WHDUpdate GUI` in a Shell): type the drawers your games are
-in - several with `;` between them, or `ALL` - and press **Check**. Type part of a name in **Find** and
+in - several with `;` between them, or `ALL` - and press **Check**. The first time, with no
+drawer set yet, click the empty **Drawers** field to pick the drawer from a requester. Type part of a name in **Find** and
 the list shows only those games. Click a game to mark it (`*`) - the game you clicked
 stays highlighted - or **Mark all** (the games the list shows), then **Update marked**. To mark
 a run of games, drag over them with the button held, or click the first and Shift-click the

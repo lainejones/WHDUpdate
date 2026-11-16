@@ -158,6 +158,12 @@ static void save_dirs(void)
     prefs_save(&G.e->prefs);
 }
 
+/* No drawer set for any set: nothing to check yet. */
+static int no_drawers(void)
+{
+    return !G.dirs[0] && !G.e->prefs.dirs[FAM_DEMOS][0] && !G.e->prefs.dirs[FAM_MAGS][0];
+}
+
 /* ---- the list ------------------------------------------------------------ */
 
 /* Does name contain part, ignoring case? */
@@ -552,7 +558,9 @@ static void set_summary(void)
     G.marked = marked;
     G.doomed = doomed;
     G.getting = getting;
-    if (!e->n)
+    if (!e->n && no_drawers())
+        snprintf(G.summary, sizeof(G.summary), "No game drawer set: click the Drawers field to pick one");
+    else if (!e->n)
         snprintf(G.summary, sizeof(G.summary), "No games checked yet");
     else if (G.filter == SHOW_UNWANTED)
         snprintf(G.summary, sizeof(G.summary), "%ld of %ld games not wanted, %ld marked to remove",
@@ -630,6 +638,8 @@ static int make_gadgets(void)
     ng.ng_Flags = PLACETEXT_LEFT;
     G.g[G_DIRS] = gad = CreateGadget(STRING_KIND, gad, &ng, GTST_String, (ULONG)G.dirs,
                                      GTST_MaxChars, sizeof(G.dirs) - 1, GA_Disabled, G.busy, TAG_END);
+    if (gad)
+        gad->Activation |= GACT_IMMEDIATE;     /* a click says so: pick_game_drawer() */
     ng.ng_LeftEdge = right - cw;
     ng.ng_Width = cw;
     ng.ng_GadgetText = (UBYTE *)"Check";
@@ -824,6 +834,35 @@ int gui_poll(void)
     return G.stop;
 }
 
+/* With no game drawer set, a click in the empty Drawers field (or Check)
+ * asks for the drawer with the ASL requester. Returns 1 when one was
+ * picked (it is then in the field and the settings), 0 on Cancel: the
+ * field stays active, so it can still be typed. */
+static int pick_game_drawer(void)
+{
+    struct FileRequester *fr;
+    char dir[sizeof(G.dirs)];
+    int ok;
+
+    if (!AslBase && !(AslBase = OpenLibrary((STRPTR)"asl.library", 37)))
+        return 0;
+    fr = (struct FileRequester *)AllocAslRequestTags(ASL_FileRequest,
+            ASLFR_Window, (ULONG)G.win, ASLFR_TitleText, (ULONG)"Which drawer are your games in?",
+            ASLFR_InitialDrawer, (ULONG)"SYS:", ASLFR_DrawersOnly, TRUE, TAG_END);
+    if (!fr)
+        return 0;
+    ok = AslRequest(fr, NULL);
+    strncpy(dir, (char *)fr->fr_Drawer, sizeof(dir) - 1);
+    dir[sizeof(dir) - 1] = 0;
+    FreeAslRequest(fr);
+    if (!ok || !dir[0])
+        return 0;
+    strcpy(G.dirs, dir);
+    GT_SetGadgetAttrs(G.g[G_DIRS], G.win, NULL, GTST_String, (ULONG)G.dirs, TAG_END);
+    save_dirs();
+    return 1;
+}
+
 /* ---- the jobs ---------------------------------------------------------- */
 
 static int cmp_games(const void *a, const void *b)
@@ -843,8 +882,8 @@ static void do_check(void)
     int stopped = 0;
 
     strcpy(G.dirs, (char *)((struct StringInfo *)G.g[G_DIRS]->SpecialInfo)->Buffer);
-    if (!G.dirs[0] && !e->prefs.dirs[FAM_DEMOS][0] && !e->prefs.dirs[FAM_MAGS][0]) {
-        gui_status("Type the drawers your games are in (Games: or Games:;Games2:), then Check");
+    if (no_drawers() && !pick_game_drawer()) {
+        gui_status("Pick or type the drawers your games are in (Games: or Games:;Games2:), then Check");
         return;
     }
     save_dirs();
@@ -1748,7 +1787,7 @@ int gui_main(struct Engine *e, const char *dirs)
     }
     set_summary();
     gui_status(G.dirs[0] ? "Checking..." :
-               "Type the drawers your games are in (Games: or Games:;Games2:), then Check");
+               "Click the Drawers field to pick the drawer your games are in, or type it");
     relayout();
     G.anchor = G.press = -1;
     e->kick_ask = gui_kick_ask;
@@ -1794,6 +1833,13 @@ int gui_main(struct Engine *e, const char *dirs)
             switch (cl) {
             case IDCMP_CLOSEWINDOW:
                 G.quit = 1;
+                break;
+            case IDCMP_GADGETDOWN:            /* the empty Drawers field clicked */
+                if (gad && gad->GadgetID == G_DIRS && !G.busy) {
+                    strcpy(G.dirs, (char *)((struct StringInfo *)G.g[G_DIRS]->SpecialInfo)->Buffer);
+                    if (no_drawers() && pick_game_drawer())
+                        do_check();
+                }
                 break;
             case IDCMP_MENUPICK:
                 while (code != MENUNULL && !G.quit) {
