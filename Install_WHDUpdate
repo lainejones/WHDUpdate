@@ -47,5 +47,5 @@
 (complete 100)
 
 (message "WHDUpdate 0.10.2 is installed in " target ".\n\n"
-         "Double-click its icon, type the drawers your games are in and press Check.")
+         "Double-click its icon and click the Drawers field to pick the drawer your games are in.")
 (exit (quiet))

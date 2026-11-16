@@ -126,6 +126,7 @@ static struct {
     char dirs[400], status[200], summary[120];
     char find[40];                /* part of a name: only those games are shown */
     struct Menu *menu;
+    int typing;                   /* the drawer requester was cancelled: the field is for typing */
 } G;
 
 static void show_dupes(void);
@@ -855,8 +856,14 @@ static int pick_game_drawer(void)
     strncpy(dir, (char *)fr->fr_Drawer, sizeof(dir) - 1);
     dir[sizeof(dir) - 1] = 0;
     FreeAslRequest(fr);
-    if (!ok || !dir[0])
+    if (!ok || !dir[0]) {
+        /* Cancel: type it then. The requester took the field's activation
+         * away, so it is given back, and later clicks don't ask again. */
+        G.typing = 1;
+        ActivateWindow(G.win);
+        ActivateGadget(G.g[G_DIRS], G.win, NULL);
         return 0;
+    }
     strcpy(G.dirs, dir);
     GT_SetGadgetAttrs(G.g[G_DIRS], G.win, NULL, GTST_String, (ULONG)G.dirs, TAG_END);
     save_dirs();
@@ -883,7 +890,7 @@ static void do_check(void)
 
     strcpy(G.dirs, (char *)((struct StringInfo *)G.g[G_DIRS]->SpecialInfo)->Buffer);
     if (no_drawers() && !pick_game_drawer()) {
-        gui_status("Pick or type the drawers your games are in (Games: or Games:;Games2:), then Check");
+        gui_status("Type the drawers your games are in (Games: or Games:;Games2:), then Check");
         return;
     }
     save_dirs();
@@ -1837,7 +1844,7 @@ int gui_main(struct Engine *e, const char *dirs)
             case IDCMP_GADGETDOWN:            /* the empty Drawers field clicked */
                 if (gad && gad->GadgetID == G_DIRS && !G.busy) {
                     strcpy(G.dirs, (char *)((struct StringInfo *)G.g[G_DIRS]->SpecialInfo)->Buffer);
-                    if (no_drawers() && pick_game_drawer())
+                    if (no_drawers() && !G.typing && pick_game_drawer())
                         do_check();
                 }
                 break;
