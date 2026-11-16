@@ -153,6 +153,7 @@ void prefs_load(Prefs *p)
         else if (!strcmp(line, "DEMODIRS"))   set_str(p->dirs[FAM_DEMOS], sizeof(p->dirs[0]), v);
         else if (!strcmp(line, "MAGDIRS"))    set_str(p->dirs[FAM_MAGS], sizeof(p->dirs[0]), v);
         else if (!strcmp(line, "PACKDIR"))    set_str(p->packdir, sizeof(p->packdir), v);
+        else if (!strcmp(line, "NOBACKUP"))   p->no_backup = atoi(v) != 0;
     }
     free(buf);
     if (!p->sets)
@@ -167,10 +168,10 @@ static int prefs_write(const Prefs *p, int keep)
         return 0;
     n = snprintf(buf, 4096,
                  "HOST=%s\nWEBDIR=%s\nFTPDIR=%s\nFTPUSER=%s\nFTPPASS=%s\nFTPONLY=%d\n"
-                 "SETS=%lx\nALLOWED=%lx\nGAMEDIRS=%s\nDEMODIRS=%s\nMAGDIRS=%s\nPACKDIR=%s\n",
+                 "SETS=%lx\nALLOWED=%lx\nGAMEDIRS=%s\nDEMODIRS=%s\nMAGDIRS=%s\nPACKDIR=%s\nNOBACKUP=%d\n",
                  p->host, p->webdir, p->ftpdir, p->user, p->pass, p->ftp_only,
                  p->sets, p->allowed, p->dirs[FAM_GAMES], p->dirs[FAM_DEMOS], p->dirs[FAM_MAGS],
-                 p->packdir);
+                 p->packdir, p->no_backup);
     if (n > 0 && n < 4096) {
         ok = save_file("ENV:" PREFSNAME, buf, n);
         if (keep)
@@ -1083,6 +1084,7 @@ static int conf_for(Engine *e, const Pack *p, BPTR log, UpdateConf *c, const cha
     c->setkey = pack_sets[p->set].store;
     c->packdir = e->prefs.packdir;
     c->ftp_only = e->prefs.ftp_only;
+    c->no_backup = e->prefs.no_backup;
     c->log = log;
     c->kick_ask = e->kick_ask;
     ftp_login(e->prefs.user, e->prefs.pass);

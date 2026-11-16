@@ -7,6 +7,7 @@
 typedef struct {
     const char *host, *webdir, *ftpdir, *setdir;  /* where the packs are */
     int ftp_only;
+    int no_backup;  /* delete the old copy after an update instead of keeping it in WHDUpdate-Old */
     /* The pack folder ("" or NULL = none): packs are taken from there, and
      * the downloaded ones kept there, as <packdir>/<setkey>/<pack>
      * (setkey = the set's drawer there: Games, Beta-Game ...). */
@@ -20,7 +21,8 @@ typedef struct {
 
 /* Update the game in drawer path (its name is the last part) to pack p.
  * (1 = not updated: kick_ask kept the old one.)
- * The old drawer and its icon go to <volume>:WHDUpdate-Old/; saves and
+ * The old drawer and its icon go to <volume>:WHDUpdate-Old/ (deleted once
+ * the new one is in place, with c->no_backup); saves and
  * high scores are copied into the new one, and the icons keep their
  * places and the tooltypes you added. 0 = updated, -1 = failed and
  * nothing changed, -2 = stopped by Ctrl-C (nothing changed). */

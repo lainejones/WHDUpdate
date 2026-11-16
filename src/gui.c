@@ -68,7 +68,7 @@ static const char *set_labels[] = {"All sets", "Games", "Games Beta", "Demos", "
 
 enum { MN_CHECK = 1, MN_UPDATE, MN_ABOUT, MN_QUIT, MN_SERVER, MN_SETS, MN_LANG, MN_SYS, MN_FTPONLY,
        MN_REMOVE, MN_INSTALL, MN_EXPORT, MN_KICKS, MN_UNDO, MN_SAVES, MN_RESCAN, MN_FETCH,
-       MN_VERIFY, MN_VERIFYALL };
+       MN_VERIFY, MN_VERIFYALL, MN_KEEPOLD };
 
 static struct NewMenu menu_def[] = {
     {NM_TITLE, (STRPTR)"Project", NULL, 0, 0, NULL},
@@ -96,6 +96,7 @@ static struct NewMenu menu_def[] = {
     {NM_ITEM, (STRPTR)"Systems...", (STRPTR)"Y", 0, 0, (APTR)MN_SYS},
     {NM_ITEM, NM_BARLABEL, NULL, 0, 0, NULL},
     {NM_ITEM, (STRPTR)"Use FTP only", NULL, CHECKIT | MENUTOGGLE, 0, (APTR)MN_FTPONLY},
+    {NM_ITEM, (STRPTR)"Keep old copies in WHDUpdate-Old", NULL, CHECKIT | MENUTOGGLE, 0, (APTR)MN_KEEPOLD},
     {NM_END, NULL, NULL, 0, 0, NULL}};
 
 static struct TextAttr topaz8 = {(STRPTR)"topaz.font", 8, FS_NORMAL, FPF_ROMFONT};
@@ -943,8 +944,9 @@ static void do_update(void)
     {
         char room[200];
         int full = engine_space(e, 0, room, sizeof(room));
-        snprintf(body, sizeof(body), "Update %ld game%s?\nThe old copies go to WHDUpdate-Old\n"
-                 "on the same volume.\n\nRoom needed: %s%s", n, n == 1 ? "" : "s", room,
+        snprintf(body, sizeof(body), "Update %ld game%s?\n%s\n\nRoom needed: %s%s", n, n == 1 ? "" : "s",
+                 e->prefs.no_backup ? "The old copies are deleted once the new\nones are in place (no Undo)." :
+                 "The old copies go to WHDUpdate-Old\non the same volume.", room,
                  full ? "\n\nThat looks like more than there is!" : "");
     }
     memset(&es, 0, sizeof(es));
@@ -977,8 +979,9 @@ static void do_update(void)
     set_busy(0);
     rebuild_list();
     set_summary();
-    say("%ld updated%s%ld failed%s. Old copies: WHDUpdate-Old; log: %s", done,
-        G.stop ? " (stopped), " : ", ", failed, kept ? ", some kept (Kickstart)" : "", LOGFILE);
+    say("%ld updated%s%ld failed%s. Old copies: %s; log: %s", done,
+        G.stop ? " (stopped), " : ", ", failed, kept ? ", some kept (Kickstart)" : "",
+        e->prefs.no_backup ? "deleted" : "WHDUpdate-Old", LOGFILE);
 }
 
 /* Remove the games marked under Not wanted: deleted, or moved to
@@ -999,14 +1002,18 @@ static void do_remove(void)
         gui_status("Show Not wanted, Won't run here or Duplicates, mark the games to remove, then Remove marked");
         return;
     }
-    snprintf(body, sizeof(body), "Remove %ld game%s?\n\nDelete: the drawers and their icons are\n"
-             "deleted for good.\nMove: they go to WHDUpdate-Old on the same\n"
-             "volume, to delete when you are sure.", n, n == 1 ? "" : "s");
+    if (e->prefs.no_backup)
+        snprintf(body, sizeof(body), "Delete %ld game%s for good?\n\nThe drawers and their icons are deleted\n"
+                 "(Settings > Keep old copies is off).", n, n == 1 ? "" : "s");
+    else
+        snprintf(body, sizeof(body), "Remove %ld game%s?\n\nDelete: the drawers and their icons are\n"
+                 "deleted for good.\nMove: they go to WHDUpdate-Old on the same\n"
+                 "volume, to delete when you are sure.", n, n == 1 ? "" : "s");
     memset(&es, 0, sizeof(es));
     es.es_StructSize = sizeof(es);
     es.es_Title = (UBYTE *)"WHDUpdate";
     es.es_TextFormat = (UBYTE *)body;
-    es.es_GadgetFormat = (UBYTE *)"Delete|Move|Cancel";
+    es.es_GadgetFormat = (UBYTE *)(e->prefs.no_backup ? "Delete|Cancel" : "Delete|Move|Cancel");
     if (!(how = EasyRequestArgs(G.win, &es, NULL, NULL)))
         return;
     set_busy(1);
@@ -1649,17 +1656,25 @@ static int choose_fonts(void)
     return 1;
 }
 
-/* The tick of "Use FTP only" follows the setting. */
-static void sync_ftp_tick(void)
+static void set_tick(int item, int on)
 {
-    struct MenuItem *it = ItemAddress(G.menu, FULLMENUNUM(1, 5, NOSUB));
+    struct MenuItem *it = ItemAddress(G.menu, FULLMENUNUM(1, item, NOSUB));
     if (!it)
         return;
-    ClearMenuStrip(G.win);
-    if (G.e->prefs.ftp_only)
+    if (on)
         it->Flags |= CHECKED;
     else
         it->Flags &= ~CHECKED;
+}
+
+/* The ticks of "Use FTP only" and "Keep old copies" follow the settings. */
+static void sync_ftp_tick(void)
+{
+    if (!G.menu)
+        return;
+    ClearMenuStrip(G.win);
+    set_tick(5, G.e->prefs.ftp_only);
+    set_tick(6, !G.e->prefs.no_backup);
     ResetMenuStrip(G.win, G.menu);
 }
 
@@ -1736,6 +1751,13 @@ static void do_menu(ULONG id, struct MenuItem *it)
         prefs_save(&G.e->prefs);
         gui_status(G.e->prefs.ftp_only ? "Pack lists and packs come by FTP" :
                    "Pack lists and packs come by HTTP, FTP if that fails");
+        break;
+    case MN_KEEPOLD:
+        G.e->prefs.no_backup = (it->Flags & CHECKED) == 0;
+        prefs_save(&G.e->prefs);
+        gui_status(G.e->prefs.no_backup ?
+                   "Old copies are deleted when a game is updated or removed" :
+                   "Old copies are kept in WHDUpdate-Old when a game is updated");
         break;
     default:
         settings((int)id);

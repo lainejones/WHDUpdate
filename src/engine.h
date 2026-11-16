@@ -34,6 +34,7 @@ typedef struct {
     unsigned long allowed;  /* variant words an unlabelled drawer may get */
     char dirs[NFAMS][400];  /* drawers per family, ';' between them */
     char packdir[160];      /* the pack folder the machines share, "" = none (update.h) */
+    int no_backup;          /* updated and removed games are deleted, not kept in WHDUpdate-Old */
 } Prefs;
 
 void prefs_default(Prefs *p);

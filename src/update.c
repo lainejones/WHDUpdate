@@ -1021,7 +1021,17 @@ int update_game(const UpdateConf *c, const char *path, const Pack *p, const char
         slave_info(path, ver, sizeof(ver), &si);
         kick_note(c, path, &si);
     }
-    say("  updated to %s%s; the old one is in %s", ver[0] ? ver : p->ver,
+    if (c->no_backup) {
+        /* the new one is in place: the old copy goes for good */
+        delete_tree(backup);
+        if (exists(backinfo))
+            DeleteFile((STRPTR)backinfo);
+        if (exists(backup))
+            say("  could not delete all of the old copy %s", backup);
+        else
+            strcpy(backup, "deleted");
+    }
+    say("  updated to %s%s; the old one: %s", ver[0] ? ver : p->ver,
            kept ? ", saves kept" : "", backup);
     snprintf(msg, sizeof(msg), "updated %s %s -> %s (%s), %d save(s) kept, old copy %s",
              path, installed[0] ? installed : "?", ver[0] ? ver : p->ver, p->file, kept, backup);

@@ -173,7 +173,8 @@ For each game you say yes to, WHDUpdate:
    its place, under the old name. If that fails, the old one goes back.
 
 Nothing changes until step 5, and the old copy stays in `WHDUpdate-Old` until you delete
-it. **Project > Undo update** puts it back: click the game, pick it, and the copy from before
+it - or, with **Settings > Keep old copies in WHDUpdate-Old** unticked, it is deleted as soon as
+the new one is in place (no Undo then), and **Remove marked** only offers to delete. **Project > Undo update** puts it back: click the game, pick it, and the copy from before
 its last update returns, with the saves made since; the newer one goes to `WHDUpdate-Old` as
 `<name>.undone`. Before an update starts, the requester (or the Shell) says about how much
 room the new versions take on each volume. Every update is logged in `PROGDIR:WHDUpdate.log`, and the drawer gets an `ArchiveName.txt`

@@ -182,8 +182,10 @@ static int cli_updates(Engine *e, int yes)
         engine_space(e, 0, room, sizeof(room));
         for (i = 0; i < e->n; i++)
             e->games[i]->marked = 0;
-        printf("\n%d game(s) to update. The old copies go to WHDUpdate-Old on the same volume.\n"
-               "Room needed for all of them: %s\n", total, room);
+        printf("\n%d game(s) to update. %s\n"
+               "Room needed for all of them: %s\n", total,
+               e->prefs.no_backup ? "The old copies are deleted (NOBACKUP=1 in the settings)." :
+               "The old copies go to WHDUpdate-Old on the same volume.", room);
     }
     for (i = 0; i < e->n && !stop; i++) {
         Game *g = e->games[i];
